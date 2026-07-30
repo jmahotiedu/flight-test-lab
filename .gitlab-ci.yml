@@ -1,0 +1,33 @@
+default:
+  image: python:3.12-bookworm
+  before_script:
+    - python -m pip install --upgrade pip
+    - python -m pip install -e ".[dev]"
+  artifacts:
+    when: always
+    expire_in: 30 days
+    paths:
+      - evidence/
+
+stages:
+  - quality
+  - test
+
+quality:
+  stage: quality
+  script:
+    - ruff check src simulator tests
+    - ruff format --check src simulator tests
+    - mypy src simulator
+
+test:
+  stage: test
+  script:
+    - mkdir -p evidence/junit evidence/logs
+    - pytest -v --junitxml=evidence/junit/test-results.xml --cov=testlab --cov=simulator --cov-report=xml:evidence/coverage.xml
+  artifacts:
+    reports:
+      junit: evidence/junit/test-results.xml
+      coverage_report:
+        coverage_format: cobertura
+        path: evidence/coverage.xml
