@@ -1,0 +1,7 @@
+requirement_id,test_case,evidence
+REQ-COM-001,tests/test_status.py::test_status_request_returns_ready,evidence/junit/test-results.xml
+REQ-COM-002,tests/test_status.py::test_status_response_meets_250_ms_deadline,evidence/junit/test-results.xml
+REQ-PROTO-001,tests/test_protocol.py::test_unknown_command_is_rejected_without_stopping_dut,evidence/junit/test-results.xml
+REQ-PROTO-001,tests/test_protocol.py::test_missing_command_is_rejected,evidence/junit/test-results.xml
+REQ-PROTO-002,tests/test_protocol.py::test_malformed_json_is_rejected_without_stopping_dut,evidence/junit/test-results.xml
+REQ-REC-001,tests/test_cleanup.py::test_dut_process_is_running_during_session,evidence/logs/dut.log
