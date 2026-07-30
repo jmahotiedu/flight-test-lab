@@ -1,0 +1,6 @@
+requirement_id,title,requirement,verification_method,acceptance_criteria
+REQ-COM-001,Status response,"The DUT shall respond to a valid status request.",Test,"Response status is ok and state is READY."
+REQ-COM-002,Status timing,"The DUT shall respond to a valid status request within 250 milliseconds.",Test,"Measured monotonic duration is less than or equal to 0.250 seconds."
+REQ-PROTO-001,Unsupported command,"The DUT shall reject an unsupported or incomplete command without terminating.",Test,"An error response is returned and a subsequent status request succeeds."
+REQ-PROTO-002,Malformed JSON,"The DUT shall reject malformed JSON without terminating.",Test,"INVALID_JSON is returned and a subsequent valid request succeeds."
+REQ-REC-001,Test cleanup,"The test harness shall terminate the DUT after the test session.",Inspection/Test,"The process is terminated or force-killed during fixture teardown."
