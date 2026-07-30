@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "flight-test-lab"
+version = "0.1.0"
+description = "Synthetic test-automation laboratory for reliable DUT control and evidence generation"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "Jared Mahotiere" }]
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "mypy>=1.15",
+    "pytest>=8.3",
+    "pytest-cov>=6.0",
+    "ruff>=0.9",
+]
+
+[tool.setuptools.packages.find]
+where = ["src", "."]
+include = ["testlab*", "simulator*"]
+
+[tool.pytest.ini_options]
+addopts = "-ra --strict-markers"
+testpaths = ["tests"]
+markers = [
+    "requirement(identifier): links a test to a software requirement",
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 88
+src = ["src", "simulator", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+files = ["src", "simulator"]
+
+[tool.coverage.run]
+source = ["testlab", "simulator"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
