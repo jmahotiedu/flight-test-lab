@@ -121,7 +121,9 @@ def _evaluate(
         # problem, not a learner mistake: GDB reads DWARF, and an MSVC build
         # ships PDBs it cannot read.  Say so, instead of leaving a bare
         # "output did not match" for the learner to decode.
-        if "does not match the generator used previously" in combined:
+        # CMake capitalises this at the start of its sentence, so match the
+        # part of the phrase whose case does not vary.
+        if "match the generator used previously" in combined:
             # cpp/build already exists and was configured by a different
             # generator. Everything in it is derived, so deleting it is the
             # documented fix rather than a risk.
@@ -237,17 +239,24 @@ def _run_gdb_attach(
     )
 
 
-def _configure_argv(cmake: str) -> list[str]:
-    """cmake configure arguments pinned to the *detected* toolchain.
+def _configure_argv(cmake: str, context: ValidatorContext) -> list[str]:
+    """cmake configure arguments, pinned to the detected toolchain when new.
 
     A bare `cmake -S cpp -B cpp/build` uses CMake's platform default, which on
-    Windows is Visual Studio even when the detected compiler is g++. The
-    lessons were unlocked by finding g++ and gdb, so the DUT has to be built
-    by that same compiler — otherwise Day 12's mandatory GDB checks face PDB
-    symbols they cannot read.
+    Windows is Visual Studio even when the detected compiler is g++ — and
+    Day 12's GDB checks cannot read the symbols that produces.  So a *fresh*
+    configure names the compiler (and Ninja, when available) explicitly.
+
+    An existing build tree is left alone.  CMake refuses to re-configure with
+    a different generator, so forcing one here would make Verify fail for a
+    learner who had already run the plain command the lesson prints — the
+    check would be arguing with its own instructions.
     """
-    toolchain = cached_toolchain()
     argv = [cmake, "-S", "cpp", "-B", "cpp/build"]
+    if (context.repo_root / "cpp" / "build" / "CMakeCache.txt").exists():
+        return argv
+
+    toolchain = cached_toolchain()
     if toolchain.cxx:
         argv.append(f"-DCMAKE_CXX_COMPILER={toolchain.cxx}")
     if toolchain.ninja:
@@ -273,7 +282,7 @@ def run(args: dict[str, Any], context: ValidatorContext) -> CheckResult:
         return _fail(tool, error)
 
     if tool == "cmake-configure":
-        argv = _configure_argv(executable)
+        argv = _configure_argv(executable, context)
     else:
         argv = [executable, *[str(item) for item in args.get("args", [])]]
     exit_status, stdout, stderr, duration_ms, timed_out = run_subprocess(

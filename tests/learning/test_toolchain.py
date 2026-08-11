@@ -175,6 +175,50 @@ def test_gdb_without_symbols_is_diagnosed_not_just_reported() -> None:
     assert "-DCMAKE_CXX_COMPILER=g++" in result.interpretation
 
 
+def test_fresh_configure_pins_the_detected_compiler(tmp_path: Path) -> None:
+    """With no build tree yet, name the compiler that unlocked the lessons."""
+    context = ValidatorContext(repo_root=tmp_path)
+    argv = toolchain_check._configure_argv("cmake", context)
+    assert argv[:5] == ["cmake", "-S", "cpp", "-B", "cpp/build"]
+    detected = toolchain_check.cached_toolchain()
+    if detected.cxx:
+        assert any(arg.startswith("-DCMAKE_CXX_COMPILER=") for arg in argv)
+    if detected.ninja:
+        assert "-G" in argv and "Ninja" in argv
+
+
+def test_configure_leaves_an_existing_build_tree_alone(tmp_path: Path) -> None:
+    """Re-configuring must not fight a tree the learner already made.
+
+    CMake refuses to switch generators in place, so forcing one here would
+    make Verify fail for anyone who ran the plain command the lesson prints.
+    """
+    build = tmp_path / "cpp" / "build"
+    build.mkdir(parents=True)
+    (build / "CMakeCache.txt").write_text(
+        "CMAKE_GENERATOR:INTERNAL=Unix Makefiles\n", encoding="utf-8"
+    )
+    context = ValidatorContext(repo_root=tmp_path)
+    argv = toolchain_check._configure_argv("cmake", context)
+    assert argv == ["cmake", "-S", "cpp", "-B", "cpp/build"]
+
+
+def test_generator_mismatch_is_diagnosed() -> None:
+    result = toolchain_check._evaluate(
+        "cmake-configure",
+        {},
+        1,
+        "",
+        "CMake Error: Error: generator : Ninja\n"
+        "Does not match the generator used previously: Unix Makefiles",
+        50,
+        False,
+        ValidatorContext(repo_root=REPO_ROOT),
+    )
+    assert not result.passed
+    assert "delete it and re-run" in result.interpretation
+
+
 def test_ptrace_denial_is_diagnosed() -> None:
     """Yama's default ptrace_scope blocks sibling attach; say what to do."""
     result = toolchain_check._evaluate(
