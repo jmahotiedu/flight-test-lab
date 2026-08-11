@@ -94,12 +94,24 @@ def load_fault_config(path: Path) -> FaultConfig:
             raise SystemExit(f"--fault-config: {key} must not be negative")
         return value
 
+    # A count of zero is ambiguous — "disabled" by the manifest's own
+    # convention (every other field treats 0 as off), or "terminate before
+    # serving anything"? Rejecting it means a manifest cannot silently select
+    # a third behaviour: today 0 would arm the fault and kill the DUT on the
+    # first request.
+    exit_after = _int("exit_after_requests", allow_none=True)
+    if exit_after is not None and exit_after < 1:
+        raise SystemExit(
+            "--fault-config: exit_after_requests must be 1 or more "
+            "(omit it, or use null, to disable the fault)"
+        )
+
     return FaultConfig(
         response_delay_ms=_int("response_delay_ms") or 0,
         drop_connection=_bool("drop_connection"),
         malformed_response=_bool("malformed_response"),
         startup_delay_ms=_int("startup_delay_ms") or 0,
-        exit_after_requests=_int("exit_after_requests", allow_none=True),
+        exit_after_requests=exit_after,
     )
 
 

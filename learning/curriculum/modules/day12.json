@@ -8,7 +8,7 @@
       "status": "available",
       "requires": ["cpp-build", "gdb"],
       "concepts": ["debugging", "cpp-integration", "failure-diagnosis"],
-      "prerequisites": ["d11-harness-either-dut"],
+      "prerequisites": ["d11-port-your-commands"],
       "source_files": ["cpp/src/server.cpp", "cpp/CMakeLists.txt"],
       "requirements": [],
       "blocks": [

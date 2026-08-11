@@ -31,26 +31,38 @@ def _marked_functions(tree: ast.AST, requirement: str) -> list[str]:
     written in a comment, a docstring or an unrelated string constant, none of
     which links a test to anything.
     """
+
+    def is_requirement_call(node: ast.AST) -> bool:
+        if not isinstance(node, ast.Call):
+            return False
+        target = node.func
+        # pytest.mark.requirement(...) — match the attribute chain ending in
+        # `.mark.requirement`, however pytest was imported or aliased.
+        if not (
+            isinstance(target, ast.Attribute)
+            and target.attr == "requirement"
+            and isinstance(target.value, ast.Attribute)
+            and target.value.attr == "mark"
+        ):
+            return False
+        return any(
+            isinstance(argument, ast.Constant) and argument.value == requirement
+            for argument in node.args
+        )
+
     marked: list[str] = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
             continue
+        # Search the whole decorator subtree, not just the top-level
+        # decorators: pytest's other idiom puts the mark on individual cases,
+        # `pytest.param(..., marks=pytest.mark.requirement("REQ-..."))`, which
+        # is what the Day 5 parametrize lesson teaches. Both forms genuinely
+        # mark the test, so both have to count.
         for decorator in node.decorator_list:
-            if not isinstance(decorator, ast.Call):
-                continue
-            target = decorator.func
-            # pytest.mark.requirement(...) — check the attribute chain ends in
-            # `.mark.requirement`, however pytest was imported or aliased.
-            if not (
-                isinstance(target, ast.Attribute)
-                and target.attr == "requirement"
-                and isinstance(target.value, ast.Attribute)
-                and target.value.attr == "mark"
-            ):
-                continue
-            for argument in decorator.args:
-                if isinstance(argument, ast.Constant) and argument.value == requirement:
-                    marked.append(node.name)
+            if any(is_requirement_call(inner) for inner in ast.walk(decorator)):
+                marked.append(node.name)
+                break
     return marked
 
 

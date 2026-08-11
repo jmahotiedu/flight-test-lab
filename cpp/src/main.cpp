@@ -114,6 +114,17 @@ int main(int argc, char** argv) {
     std::cerr << "--port must be between 1 and 65535\n";
     return 1;
   }
+  // A negative delay makes sleep_for return immediately while the fault is
+  // still logged as engaged, so the run would report a timing fault that
+  // never happened. The Python DUT rejects this; so does this one.
+  if (options.fault_delay_ms < 0) {
+    std::cerr << "--fault-delay-ms must not be negative\n";
+    return 1;
+  }
+  if (options.fault_after < 0) {
+    std::cerr << "--fault-after must not be negative\n";
+    return 1;
+  }
 
   if (!dut::configure_logging(log_file, verbose)) {
     std::cerr << "--log-file could not be opened: " << log_file << "\n";

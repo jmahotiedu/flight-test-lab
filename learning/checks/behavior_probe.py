@@ -107,6 +107,16 @@ def _run_steps(
                     continue
                 failures.append(f"{label}: response was not valid JSON: {line!r}")
                 continue
+            if step.get("expect_invalid_json"):
+                # The inverse assertion matters as much as the first one: if
+                # the malformed-response fault silently stopped working, the
+                # DUT would answer with a perfectly valid object and the check
+                # would pass having proved the opposite of its intent.
+                failures.append(
+                    f"{label}: expected an unparseable response, but the DUT "
+                    f"returned valid JSON: {line.rstrip()!r}"
+                )
+                continue
             expect = step.get("expect")
             if isinstance(expect, dict):
                 failures.extend(f"{label}: {m}" for m in _matches(expect, payload))

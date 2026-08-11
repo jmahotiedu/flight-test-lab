@@ -307,6 +307,44 @@ def test_requirement_marker_must_be_a_real_decorator(tmp_path: Path) -> None:
     assert ok.passed, ok.interpretation
 
 
+def test_requirement_marker_accepts_the_parametrize_idiom(tmp_path: Path) -> None:
+    """Day 5 teaches marks= on individual pytest.param entries.
+
+    This is the exact file from that lesson's full-solution hint. A check that
+    only looks at function decorators rejects the solution the course tells
+    the learner to write.
+    """
+    taught = tmp_path / "test_build_response.py"
+    taught.write_text(
+        '"""Pure-unit tests for build_response() error paths."""\n\n'
+        "from __future__ import annotations\n\n"
+        "import pytest\n\n"
+        "from simulator.simulator import build_response\n\n\n"
+        "@pytest.mark.parametrize(\n"
+        "    ('message', 'expected_error'),\n"
+        "    [\n"
+        "        pytest.param(['status'], 'INVALID_MESSAGE_TYPE',\n"
+        "                     marks=pytest.mark.requirement('REQ-PROTO-001'),\n"
+        "                     id='list-input'),\n"
+        "    ],\n"
+        ")\n"
+        "def test_build_response_error_cases(message, expected_error):\n"
+        "    response = build_response(message)\n"
+        "    assert response['error_code'] == expected_error\n",
+        encoding="utf-8",
+    )
+    result = run_validator(
+        "source_check",
+        {
+            "file": str(taught),
+            "must_contain": ["parametrize"],
+            "must_have_requirement_marker": "REQ-PROTO-001",
+        },
+        ValidatorContext(repo_root=tmp_path),
+    )
+    assert result.passed, result.interpretation
+
+
 def test_junit_evidence_requires_the_expected_outcome(tmp_path: Path) -> None:
     """A recorded name is not a recorded result."""
     report = tmp_path / "results.xml"

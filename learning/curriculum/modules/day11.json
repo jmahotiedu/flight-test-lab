@@ -71,9 +71,17 @@
           "id": "verify-parity",
           "validator": "pytest_check",
           "mandatory": true,
-          "description": "Runs the parity suite: the same bytes are sent to both DUTs and the replies must match exactly.",
+          "description": "Runs the shipped-protocol parity suite: the same bytes go to both DUTs and the replies must match exactly. (Commands you added on Days 2 and 9 are checked separately, in the porting lesson.)",
           "args": {
-            "nodeids": ["tests/test_cpp_dut.py"],
+            "nodeids": [
+              "tests/test_cpp_dut.py::test_cpp_dut_is_byte_identical_to_python",
+              "tests/test_cpp_dut.py::test_cpp_dut_matches_python_on_raw_bytes",
+              "tests/test_cpp_dut.py::test_cpp_dut_answers_status_within_deadline",
+              "tests/test_cpp_dut.py::test_cpp_dut_survives_malformed_input",
+              "tests/test_cpp_dut.py::test_cpp_dut_handles_concurrent_clients",
+              "tests/test_cpp_dut.py::test_cpp_dut_frames_on_newlines_not_packets",
+              "tests/test_cpp_dut.py::test_cpp_dut_writes_the_same_evidence_lines"
+            ],
             "expect": "pass",
             "junit_contains": ["test_cpp_dut_is_byte_identical_to_python"],
             "timeout_seconds": 180,
@@ -170,7 +178,6 @@
             "args": ["--test-dir", "cpp/build", "-C", "Debug", "--output-on-failure"],
             "expect_exit": 0,
             "expect_output_regex": "100% tests passed",
-            "forbid_output_regex": "(?i)tests? failed",
             "timeout_seconds": 120,
             "success_note": "CTest ran every registered case and all passed — the same requirement checks the Python suite makes, enforced at the native level."
           }
@@ -282,6 +289,86 @@
         { "level": 1, "text": "The tests do not import the DUT. Ask yourself what they *do* depend on — a host, a port, and a protocol." },
         { "level": 2, "text": "conftest.py::dut_command is the switch; the dut fixture calls it with whatever --dut selected, and everything downstream sees only a RunningDut." },
         { "level": 3, "text": "Environment variable FTL_DUT=cpp does the same thing as --dut cpp, which is how CI can run the whole suite twice without editing any command line." }
+      ]
+    },
+    {
+      "id": "d11-port-your-commands",
+      "title": "Port your own commands to C++",
+      "objective": "Implement the commands you added to the Python DUT on Days 2 and 9 in the C++ DUT, and prove the two implementations agree again.",
+      "estimated_minutes": 25,
+      "status": "available",
+      "requires": ["cpp-build"],
+      "concepts": ["cpp-integration", "protocol-design"],
+      "prerequisites": ["d11-harness-either-dut"],
+      "source_files": ["cpp/src/protocol.cpp", "simulator/simulator.py", "tests/test_cpp_dut.py"],
+      "requirements": ["REQ-CPP-001"],
+      "blocks": [
+        {
+          "type": "learn",
+          "id": "learn",
+          "text": "Two implementations of one protocol drift the moment you change either of them — and you already changed one. Day 2 added `ping` to the Python DUT; Day 9 added `counter`. The C++ DUT knows neither.\n\nThat is not a hypothetical: `test_course_added_commands_do_not_diverge` sends both commands to both DUTs and requires identical replies. On an untouched checkout it passes because both reject them. After your edits it fails, and it is *right* to fail — your lab now behaves differently depending on which DUT answered.\n\nThe fix is the ordinary one in a two-implementation system: port the feature, then re-run the parity suite.",
+          "more": "This is the maintenance cost that a second implementation buys you, and it is worth naming honestly. Every protocol change is now two changes plus a parity run. Teams pay that cost deliberately — a reference implementation and a production one, a simulator and a firmware build — because the payoff is that a disagreement between them is a *detectable defect* rather than a silent behavioural difference discovered in the lab at 2 a.m.\n\nNotice what makes the port cheap here: `build_response()` in both implementations is a pure function with the same shape, so the C++ change is the same shape as the Python one — a branch returning a fixed object plus the echoed sequence. If the two had drifted architecturally, this exercise would be much harder, which is the argument for keeping a reference implementation structurally close to the thing it mirrors.\n\nIf you skipped Day 2 or Day 9, the corresponding command is absent from *both* DUTs, they still agree, and the check passes — port only what you actually added."
+        },
+        {
+          "type": "predict",
+          "id": "predict",
+          "question": "You added ping to the Python DUT on Day 2 but not to the C++ one. What does `pytest tests/test_cpp_dut.py --dut cpp` report?",
+          "options": [
+            "Everything passes — ping is not part of the shipped protocol",
+            "test_course_added_commands_do_not_diverge fails, showing pong from one DUT and UNSUPPORTED_COMMAND from the other",
+            "The suite errors, because the C++ DUT cannot parse a ping request",
+            "The tests skip, because ping is a learner extension"
+          ],
+          "answer_index": 1,
+          "reveal": "The parity test does not care whether a command is 'official'. It asks whether the two DUTs answer the same bytes the same way, and after Day 2 they do not. That is the whole point of a parity suite: it detects the drift you introduced, including drift you introduced on purpose."
+        },
+        {
+          "type": "do",
+          "id": "do",
+          "instructions": "Port each command you added, in `cpp/src/protocol.cpp`, inside `build_response()` next to the `status` branch.\n\n**ping** (Day 2) — return `{\"status\": \"ok\", \"reply\": \"pong\", \"sequence\": <echoed>}`:\n\n```if (command->is_string() && command->as_string() == \"ping\") {\n  return Object{{\"status\", Value(\"ok\")},\n                {\"reply\", Value(\"pong\")},\n                {\"sequence\", sequence_of(request)}};\n}\n```\n\n**counter** (Day 9) — if you added it, mirror your Python semantics exactly, including the shared-state protection: the C++ server runs one thread per connection, so a counter needs a mutex for the same reason the Python one needed a lock.\n\nThen rebuild and run the divergence check:\n\n```cmake --build cpp/build\npytest -v tests/test_cpp_dut.py -k course_added\n```\n\nIf you skipped Day 2 or Day 9, that command is missing from both DUTs, they agree, and the test passes untouched.",
+          "command": "pytest -v tests/test_cpp_dut.py -k course_added"
+        },
+        {
+          "type": "verify",
+          "id": "verify-no-divergence",
+          "validator": "pytest_check",
+          "mandatory": true,
+          "description": "Sends every course-added command to both DUTs and requires identical replies — so the two implementations agree about the commands you added, not just the ones that shipped.",
+          "args": {
+            "nodeids": ["tests/test_cpp_dut.py::test_course_added_commands_do_not_diverge"],
+            "expect": "pass",
+            "junit_contains": ["test_course_added_commands_do_not_diverge"],
+            "timeout_seconds": 180,
+            "success_note": "Your two DUTs agree again, including the commands you added yourself. A protocol change is two changes plus a parity run — that is the maintenance cost of a second implementation, paid in full."
+          }
+        },
+        {
+          "type": "verify",
+          "id": "verify-full-parity",
+          "validator": "pytest_check",
+          "mandatory": true,
+          "description": "Re-runs the whole parity suite, so porting a command cannot have broken anything that already agreed.",
+          "args": {
+            "nodeids": ["tests/test_cpp_dut.py"],
+            "expect": "pass",
+            "junit_contains": ["test_cpp_dut_is_byte_identical_to_python"],
+            "timeout_seconds": 180,
+            "success_note": "Full parity restored across every case — shipped protocol, malformed input, and your own additions."
+          }
+        },
+        {
+          "type": "explain",
+          "id": "explain",
+          "question": "A colleague proposes dropping the parity suite because 'it just fails whenever we add a feature'. What is the argument against, and what is the legitimate version of their complaint?",
+          "keywords": ["drift", "detect", "cost", "both", "silent"],
+          "sample_answer": "The failures are the product: without them the two implementations drift silently and a defect only appears when someone runs the other DUT, often in the lab under time pressure. The legitimate complaint is about cost — every protocol change becomes two changes plus a parity run — and the honest answers are to keep the implementations structurally similar so ports are mechanical, and to be deliberate about whether a second implementation is worth that tax at all."
+        }
+      ],
+      "hints": [
+        { "level": 1, "text": "The parity test is not asking for anything exotic: make the C++ DUT answer the same way your Python DUT does for the commands you added." },
+        { "level": 2, "text": "cpp/src/protocol.cpp, build_response(): the status branch is the template. sequence_of(request) echoes the sequence the same way." },
+        { "level": 3, "text": "The response object literal is Object{{\"key\", Value(...)}, ...}; keys are sorted at serialisation time, so declaration order does not matter." },
+        { "level": 4, "text": "If you added counter on Day 9, remember the C++ server is thread-per-connection too: guard the shared count with a std::mutex (or make it std::atomic<int>), or you will reproduce the race Day 9 taught you to find — this time in a language with no GIL to hide it." }
       ]
     }
   ]

@@ -183,11 +183,23 @@ class ProgressStore:
             self._state["last_lesson_id"] = lesson_id
             self._save_locked()
 
-    def record_validation(self, lesson_id: str, block_id: str, passed: bool) -> None:
+    def record_validation(
+        self,
+        lesson_id: str,
+        block_id: str,
+        passed: bool,
+        *,
+        mandatory: bool = True,
+    ) -> None:
         with self._lock:
             record = self._lesson_record_locked(lesson_id)
             record["validations"][block_id] = {"passed": passed, "at": _now()}
-            if not passed and record.get("status") == "complete":
+            # Only a *mandatory* check can un-complete a lesson. Some lessons
+            # ship a demonstration check that is meant to go red (Day 14's
+            # symptom probe); re-running one of those after finishing the
+            # lesson must not revoke the certification, or the roadmap would
+            # contradict lesson_completion().
+            if not passed and mandatory and record.get("status") == "complete":
                 # Re-running a check that now fails un-completes the lesson.
                 # lesson_completion() already reports the missing gate, but the
                 # roadmap, /api/state and prerequisite unlocking read the

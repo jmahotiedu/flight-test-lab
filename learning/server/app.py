@@ -437,7 +437,12 @@ class LearningHandler(BaseHTTPRequestHandler):
             )
             return
         result = run_validator(verify_block["validator"], args, self.server.context)
-        self.server.progress.record_validation(lesson.id, str(block_id), result.passed)
+        self.server.progress.record_validation(
+            lesson.id,
+            str(block_id),
+            result.passed,
+            mandatory=bool(verify_block.get("mandatory", False)),
+        )
         self._send_json(result.to_dict())
 
     def _handle_complete(self, body: dict[str, Any]) -> None:

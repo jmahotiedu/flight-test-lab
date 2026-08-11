@@ -24,6 +24,11 @@ def _start_dut(
     host = "127.0.0.1"
     port = reserve_local_port()
     log_path = evidence_dir / "logs" / log_name
+    # The DUT opens its log in append mode, so a line written by a previous
+    # run would still satisfy these assertions. A regression that stopped
+    # emitting fault_injected would then stay green on stale evidence — the
+    # failure mode this whole suite exists to catch. Start each run empty.
+    log_path.unlink(missing_ok=True)
     process = subprocess.Popen(
         [
             sys.executable,
@@ -153,6 +158,7 @@ def test_fault_config_file_drives_injection(evidence_dir: Path) -> None:
         host = "127.0.0.1"
         port = reserve_local_port()
         log_path = evidence_dir / "logs" / "dut-fault-config.log"
+        log_path.unlink(missing_ok=True)  # never assert on a previous run's line
         process = subprocess.Popen(
             [
                 sys.executable,

@@ -219,10 +219,14 @@
           "id": "v-traceability-row",
           "validator": "artifact_check",
           "mandatory": true,
-          "description": "Checks that the requirement is mapped to the test that verifies it, closing requirement -> test -> evidence for the command you just added.",
+          "description": "Parses traceability.csv and requires one complete row: REQ-PROTO-003 mapped to your ping test's node ID and the JUnit evidence file. A row naming the wrong test would be an unusable map.",
           "args": {
             "file": "requirements/traceability.csv",
-            "csv_row": { "requirement_id": "REQ-PROTO-003" },
+            "csv_row_matches": {
+              "requirement_id": "^REQ-PROTO-003$",
+              "test_case": "^tests/test_ping\\.py::\\S+$",
+              "evidence": "^evidence/junit/test-results\\.xml$"
+            },
             "success_note": "The chain is closed: REQ-PROTO-003 is declared, verified by a test, and mapped to the evidence that test produces. Day 7 goes deeper on this."
           }
         },
