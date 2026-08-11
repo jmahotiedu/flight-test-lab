@@ -1,0 +1,225 @@
+{
+  "lessons": [
+    {
+      "id": "d3-sockets-and-loopback",
+      "title": "Sockets, ports, and the loopback interface",
+      "objective": "Understand host/port/bind/listen/accept well enough to explain why 127.0.0.1 test traffic never leaves the machine — and prove it with a raw socket.",
+      "estimated_minutes": 12,
+      "concepts": ["networking"],
+      "prerequisites": ["d2-add-ping-test-first"],
+      "source_files": ["simulator/simulator.py"],
+      "requirements": ["REQ-COM-001"],
+      "blocks": [
+        {
+          "type": "learn",
+          "id": "learn",
+          "text": "A TCP server endpoint is a **(host, port)** pair. `ThreadingDutServer((host, port), ...)` binds that pair and listens; each `accept` produces a connected socket handled by `DutRequestHandler` on its own thread.\n\nBinding to `127.0.0.1` — the **loopback** interface — means the OS only accepts connections that originate on this machine. Packets to 127.0.0.1 never reach a NIC, a router, or a wire. That is why the whole test lab can run real TCP with zero network risk.",
+          "more": "A port is a 16-bit demultiplexing number: one machine can host many servers because the OS keys connections by (protocol, local addr, local port, remote addr, remote port). Your client also gets a port — an *ephemeral* one the OS picks from the high range when you connect without binding first. Binding to `0.0.0.0` instead of `127.0.0.1` listens on *every* interface, including the LAN — never what a test DUT wants. `allow_reuse_address = True` on ThreadingDutServer sets SO_REUSEADDR so a restarted server can rebind a port still in TIME_WAIT; without it, back-to-back test runs would flake with 'address already in use'."
+        },
+        {
+          "type": "predict",
+          "id": "predict",
+          "question": "The DUT runs with `--host 127.0.0.1 --port 9779`. A colleague on the same LAN tries to connect to your machine's real IP on port 9779. What happens?",
+          "options": [
+            "It connects — TCP is TCP",
+            "Connection refused — nothing is listening for that interface",
+            "It connects but the DUT rejects the JSON",
+            "It hangs forever with no error"
+          ],
+          "answer_index": 1,
+          "reveal": "The DUT bound only the loopback interface, so the OS has no listener on the LAN interface's 9779 — the SYN gets an RST: connection refused. Binding chooses WHICH local addresses accept connections; it is the first access-control boundary a test rig has."
+        },
+        {
+          "type": "do",
+          "id": "do",
+          "instructions": "Talk to the DUT with a **raw socket** — no LabClient. Start the server in one terminal:\n\n```python -m simulator.simulator --port 9779\n```\n\nIn a second terminal (venv active, repo root), use a REPL:\n\n```import socket\nc = socket.create_connection(('127.0.0.1', 9779), timeout=3)\nc.sendall(b'{\"command\":\"status\",\"sequence\":1}\\n')\nprint(c.makefile('r', encoding='utf-8').readline())\nc.close()\n```\n\nNote the exact reply text: `json.dumps` with default separators renders `\"state\": \"READY\"` **with a space** after each colon — you will need that precision when matching responses later. (bash: same Python, only the venv activation differs.)",
+          "command": "python -m simulator.simulator --port 9779"
+        },
+        {
+          "type": "verify",
+          "id": "verify",
+          "validator": "python_probe",
+          "mandatory": true,
+          "description": "Launches the DUT as a child process on a reserved ephemeral port, waits for it to accept connections, sends a status request over a raw socket, prints the reply line, and terminates the child in a finally block.",
+          "args": {
+            "snippet": "import socket, subprocess, sys, time\nprobe = socket.socket()\nprobe.bind(('127.0.0.1', 0))\nport = probe.getsockname()[1]\nprobe.close()\nproc = subprocess.Popen([sys.executable, '-m', 'simulator.simulator', '--port', str(port)], stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)\ntry:\n    deadline = time.monotonic() + 5.0\n    while True:\n        try:\n            conn = socket.create_connection(('127.0.0.1', port), timeout=1.0)\n            break\n        except OSError:\n            if time.monotonic() > deadline:\n                raise\n            time.sleep(0.05)\n    conn.sendall(b'{\"command\":\"status\",\"sequence\":1}\\n')\n    reply = conn.makefile('r', encoding='utf-8').readline()\n    print(reply.strip())\n    conn.close()\nfinally:\n    proc.terminate()\n    proc.wait(timeout=5)",
+            "expect_stdout_regex": "\"state\": \"READY\"",
+            "timeout_seconds": 15,
+            "success_note": "A child-process DUT on a loopback-only ephemeral port answered a raw-socket status request and was cleanly terminated. You just built the core of every harness in this lab."
+          }
+        },
+        {
+          "type": "explain",
+          "id": "explain",
+          "question": "Why can many test runs on one machine each start their own DUT without interfering, and why does none of that traffic touch the network?",
+          "keywords": ["loopback", "port"],
+          "sample_answer": "Each DUT binds 127.0.0.1 with its own port, and the OS keys connections by the full (addr, port) tuple, so the servers coexist. Loopback traffic is handled entirely inside the OS network stack — it never reaches a physical interface, so nothing leaves the machine."
+        }
+      ],
+      "hints": [
+        { "level": 1, "text": "A listener is bound to a specific local address. Which local addresses exist on your machine, and which one is 127.0.0.1?" },
+        { "level": 2, "text": "Look at run_server() in simulator/simulator.py: ThreadingDutServer((host, port), ...) is the bind+listen; DutRequestHandler.handle() runs per accepted connection." },
+        { "level": 3, "text": "To get a guaranteed-free port, bind a temporary socket to ('127.0.0.1', 0), read getsockname()[1], close it, then hand that port to the DUT." }
+      ]
+    },
+    {
+      "id": "d3-streams-framing",
+      "title": "TCP is a byte stream — newlines frame the messages",
+      "objective": "Internalize that TCP delivers an undelimited byte stream, and that this protocol's newline is the only message boundary the server recognizes.",
+      "estimated_minutes": 14,
+      "concepts": ["networking", "protocol-design"],
+      "prerequisites": ["d3-sockets-and-loopback"],
+      "source_files": ["simulator/simulator.py", "src/testlab/client.py"],
+      "flow": "tcp_request_loop",
+      "requirements": [],
+      "blocks": [
+        {
+          "type": "learn",
+          "id": "learn",
+          "text": "TCP has **no message boundaries** — it is an ordered byte stream. One `sendall` can arrive as several chunks; several `sendall`s can arrive merged. Boundaries must come from the protocol itself.\n\nThis lab frames with a newline: the handler's `self.rfile.readline()` reads bytes until `\\n` and treats that as one complete request. Until the newline arrives, `readline()` **blocks** — the server cannot know your partial bytes are 'a message yet'.",
+          "more": "Newline framing is one classic answer; the other is length-prefixing (send a fixed-size byte count, then exactly that many bytes — what most binary protocols do). Newlines are human-debuggable but require an escaping rule if payloads can contain '\\n' (JSON guarantees this: a literal newline inside a string is encoded as the two characters backslash-n, never a raw 0x0A). The send/recv asymmetry trips everyone once: sendall() returning means the OS accepted your bytes into a buffer — it says nothing about delivery, and TCP is free to split or coalesce. readline() on the server's buffered rfile hides all of that by accumulating until the delimiter."
+        },
+        {
+          "type": "predict",
+          "id": "predict",
+          "question": "A client sends `{\"command\": \"status\", \"sequence\": 1}` but forgets the trailing `\\n`. What does each side do?",
+          "options": [
+            "The server answers immediately; TCP delivers messages, not bytes",
+            "The server blocks in readline() waiting for the newline; the client eventually times out waiting for a reply",
+            "The server replies with INVALID_JSON because the line is unterminated",
+            "The OS closes the connection as malformed"
+          ],
+          "answer_index": 1,
+          "reveal": "readline() blocks until the newline byte arrives — a well-formed JSON object without its framing byte is indistinguishable from a message still in flight. The client waits for a response that cannot come and dies by its own timeout. The experiment below makes you watch it happen."
+        },
+        {
+          "type": "do",
+          "id": "do",
+          "instructions": "Reproduce the blocked readline yourself. Start the DUT in one terminal:\n\n```python -m simulator.simulator --port 9780\n```\n\nIn a REPL in another terminal:\n\n```import socket\nc = socket.create_connection(('127.0.0.1', 9780), timeout=3)\nc.settimeout(2)\nc.sendall(b'{\"command\": \"status\"')   # no newline — half a request\ntry:\n    c.recv(4096)\nexcept (TimeoutError, OSError) as e:\n    print('blocked:', type(e).__name__)\nc.sendall(b', \"sequence\": 2}\\n')      # completes the SAME line\nprint(c.recv(4096).decode())\nc.close()\n```\n\nWatch the two-second stall, then the single answer. The server glued both sends into one line and parsed it once — proof that the newline, not your send() calls, defines the message.",
+          "command": "python -m simulator.simulator --port 9780"
+        },
+        {
+          "type": "verify",
+          "id": "verify-framing",
+          "validator": "behavior_probe",
+          "mandatory": true,
+          "description": "On one live connection, sends the two halves of a status request as separate newline-terminated lines. Because the newline is the message boundary, the DUT parses each half as its own (broken) message; a complete well-formed line afterwards still gets a normal answer.",
+          "args": {
+            "response_timeout": 1.5,
+            "wait_ready": true,
+            "steps": [
+              { "send_raw": "{\"command\": \"status\"", "expect": { "status": "error", "error_code": "INVALID_JSON" } },
+              { "send_raw": ", \"sequence\": 2}\n", "expect": { "status": "error", "error_code": "INVALID_JSON" } },
+              { "send": { "command": "status", "sequence": 3 }, "expect": { "status": "ok", "state": "READY", "sequence": 3 } }
+            ],
+            "success_note": "Newline is the message boundary: what you meant as one request arrived as two lines, each parsed independently and each invalid — and the connection stayed healthy for the next well-framed line."
+          }
+        },
+        {
+          "type": "verify",
+          "id": "verify-blocking",
+          "validator": "python_probe",
+          "mandatory": false,
+          "description": "Optional but worth it: the literal blocking case. Sends half a request with NO newline, observes the timeout, then completes the same line and gets exactly one answer.",
+          "args": {
+            "snippet": "import socket, subprocess, sys, time\nprobe = socket.socket()\nprobe.bind(('127.0.0.1', 0))\nport = probe.getsockname()[1]\nprobe.close()\nproc = subprocess.Popen([sys.executable, '-m', 'simulator.simulator', '--port', str(port)], stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)\ntry:\n    deadline = time.monotonic() + 5.0\n    while True:\n        try:\n            conn = socket.create_connection(('127.0.0.1', port), timeout=1.0)\n            break\n        except OSError:\n            if time.monotonic() > deadline:\n                raise\n            time.sleep(0.05)\n    conn.settimeout(1.5)\n    conn.sendall(b'{\"command\": \"status\"')\n    try:\n        conn.recv(4096)\n        print('unexpected: response without a complete line')\n    except (TimeoutError, OSError):\n        print('blocked: no response until the newline')\n    conn.sendall(b', \"sequence\": 2}\\n')\n    print(conn.recv(4096).decode('utf-8').strip())\n    conn.close()\nfinally:\n    proc.terminate()\n    proc.wait(timeout=5)",
+            "expect_stdout_regex": "blocked: no response until the newline[\\s\\S]*\"state\": \"READY\"",
+            "forbid_stdout_regex": "unexpected",
+            "timeout_seconds": 20,
+            "success_note": "Partial line: silence. Newline arrives: one response for the whole line. That is stream framing in one transcript."
+          }
+        },
+        {
+          "type": "explain",
+          "id": "explain",
+          "question": "In your do-experiment, why did the first (newline-less) send get no response at all, and why did completing the line produce exactly one answer?",
+          "keywords": ["newline", "framing", "stream"],
+          "sample_answer": "TCP is a byte stream with no message boundaries, so the server frames on the newline: readline() blocks until '\\n' arrives, treating everything before it as one message. My first send sat in the stream unterminated; the second send supplied the framing byte, the two halves were concatenated into one line, and it was parsed once."
+        }
+      ],
+      "hints": [
+        { "level": 1, "text": "Ask: how could the server know a message is 'complete' when TCP can split or merge sends arbitrarily? It needs a rule, not an event." },
+        { "level": 2, "text": "Read DutRequestHandler.handle() in simulator/simulator.py — the `while line := self.rfile.readline():` loop is the framing rule, and readline blocks for the delimiter." },
+        { "level": 3, "text": "Experiment: sendall(b'{\"command\": \"status\"') with a 2 s timeout, catch the timeout, then sendall(b', \"sequence\": 2}\\n') and recv — one response for the combined line." }
+      ]
+    },
+    {
+      "id": "d3-malformed-input",
+      "title": "Malformed input: invalid JSON and invalid UTF-8",
+      "objective": "Verify the DUT rejects malformed input with a clean error and keeps serving — robustness is a requirement, not a hope.",
+      "estimated_minutes": 12,
+      "concepts": ["networking", "failure-diagnosis"],
+      "prerequisites": ["d3-streams-framing"],
+      "source_files": ["simulator/simulator.py"],
+      "requirements": ["REQ-PROTO-002"],
+      "blocks": [
+        {
+          "type": "learn",
+          "id": "learn",
+          "text": "Two distinct failure layers sit before `build_response()` ever runs:\n\n- **Decode**: raw bytes become text via `line.decode(\"utf-8\", errors=\"replace\")` — invalid UTF-8 becomes U+FFFD replacement characters instead of raising.\n- **Parse**: `json.loads()` raises `JSONDecodeError` on malformed JSON; the handler catches it and answers `{\"status\": \"error\", \"error_code\": \"INVALID_JSON\"}`.\n\nBoth are contained **per line**: the request loop continues, the connection stays open, the server survives.",
+          "more": "REQ-PROTO-002 is the requirement: reject malformed JSON without terminating, and prove a subsequent valid request succeeds. The design choice worth copying into any DUT: decode with errors=\"replace\" so a garbage payload can still be logged for forensics (the request log line shows the replacement characters) — crashing on decode would destroy the evidence along with the connection. The catch is scoped tightly around json.loads only; anything else still propagates. Note the INVALID_JSON response deliberately carries no 'sequence' field — there is nothing trustworthy to echo back."
+        },
+        {
+          "type": "predict",
+          "id": "predict",
+          "question": "You send `{not json` (terminated by a newline) and then a valid status request on the same connection. What happens?",
+          "options": [
+            "The handler thread crashes and the connection drops",
+            "An INVALID_JSON error response, then a normal READY answer",
+            "The server exits with a nonzero code",
+            "Both requests are silently ignored"
+          ],
+          "answer_index": 1,
+          "reveal": "The JSONDecodeError is caught inside the per-line loop: the bad line gets an error response, and the loop simply reads the next line. Malformed input is an expected case with a defined answer — that is what makes it testable against REQ-PROTO-002."
+        },
+        {
+          "type": "do",
+          "id": "do",
+          "instructions": "Attack the DUT yourself, then check it kept serving. Start it with a log:\n\n```python -m simulator.simulator --port 9781 --log-file evidence/logs/malformed.log\n```\n\nIn a REPL:\n\n```import socket\nc = socket.create_connection(('127.0.0.1', 9781), timeout=3)\nr = c.makefile('r', encoding='utf-8')\nc.sendall(b'{not json\\n')\nprint(r.readline())          # INVALID_JSON\nc.sendall(b'\\xff\\xfe\\n')      # not even valid UTF-8\nprint(r.readline())          # INVALID_JSON again\nc.sendall(b'{\"command\": \"status\", \"sequence\": 5}\\n')\nprint(r.readline())          # still READY\nc.close()\n```\n\nThen open `evidence/logs/malformed.log` and find the request lines — the invalid UTF-8 payload appears with replacement characters, because `errors=\"replace\"` preserved the evidence instead of raising.",
+          "command": "python -m simulator.simulator --port 9781 --log-file evidence/logs/malformed.log"
+        },
+        {
+          "type": "verify",
+          "id": "verify",
+          "validator": "behavior_probe",
+          "mandatory": true,
+          "description": "Sends a malformed JSON line, then a valid status request on the same connection — the REQ-PROTO-002 acceptance criteria, verbatim.",
+          "args": {
+            "response_timeout": 1.5,
+            "wait_ready": true,
+            "steps": [
+              { "send_raw": "{not json", "expect": { "status": "error", "error_code": "INVALID_JSON" } },
+              { "send": { "command": "status", "sequence": 5 }, "expect": { "status": "ok", "state": "READY", "sequence": 5 } }
+            ],
+            "success_note": "Malformed line rejected with INVALID_JSON, connection still alive, next valid request answered READY. REQ-PROTO-002 holds."
+          }
+        },
+        {
+          "type": "verify",
+          "id": "verify-utf8",
+          "validator": "python_probe",
+          "mandatory": false,
+          "description": "Optional: puts genuinely invalid UTF-8 bytes on the wire (behavior_probe can only send valid encodings) and confirms the same INVALID_JSON-then-READY survival.",
+          "args": {
+            "snippet": "import socket, subprocess, sys, time\nprobe = socket.socket()\nprobe.bind(('127.0.0.1', 0))\nport = probe.getsockname()[1]\nprobe.close()\nproc = subprocess.Popen([sys.executable, '-m', 'simulator.simulator', '--port', str(port)], stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)\ntry:\n    deadline = time.monotonic() + 5.0\n    while True:\n        try:\n            conn = socket.create_connection(('127.0.0.1', port), timeout=1.0)\n            break\n        except OSError:\n            if time.monotonic() > deadline:\n                raise\n            time.sleep(0.05)\n    reader = conn.makefile('r', encoding='utf-8')\n    conn.sendall(b'\\xff\\xfe\\n')\n    print(reader.readline().strip())\n    conn.sendall(b'{\"command\": \"status\", \"sequence\": 6}\\n')\n    print(reader.readline().strip())\n    conn.close()\nfinally:\n    proc.terminate()\n    proc.wait(timeout=5)",
+            "expect_stdout_regex": "\"error_code\": \"INVALID_JSON\"[\\s\\S]*\"state\": \"READY\"",
+            "timeout_seconds": 20,
+            "success_note": "Raw invalid UTF-8 on the wire: decode-with-replace turned it into harmless text, the parse failed cleanly, and the next valid request was answered."
+          }
+        },
+        {
+          "type": "explain",
+          "id": "explain",
+          "question": "Why does the server survive malformed input instead of crashing, and what does errors=\"replace\" buy you beyond survival?",
+          "keywords": ["errors", "replace", "JSONDecodeError"],
+          "sample_answer": "The handler catches JSONDecodeError around json.loads and turns it into an INVALID_JSON response inside the request loop, so a bad line never unwinds the loop or the server. errors=\"replace\" means even undecodable bytes become loggable text (with U+FFFD markers) instead of a UnicodeDecodeError, so the evidence of what arrived survives in the log."
+        }
+      ],
+      "hints": [
+        { "level": 1, "text": "There are two separate things that can go wrong with incoming bytes, and the code handles each at its own layer. Find both." },
+        { "level": 2, "text": "Read DutRequestHandler.handle() in simulator/simulator.py: the decode call and the try/except around json.loads are the two containment points." },
+        { "level": 3, "text": "Send b'\\xff\\xfe\\n' then a valid status line on one connection; you should see INVALID_JSON then READY, and the log should show replacement characters for the bad bytes." }
+      ]
+    }
+  ]
+}

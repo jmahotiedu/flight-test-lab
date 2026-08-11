@@ -1,0 +1,211 @@
+{
+  "lessons": [
+    {
+      "id": "d8-fault-modes",
+      "title": "The five fault modes: failure on demand",
+      "objective": "Tour the simulator's fault-injection modes and see a delayed response engage deterministically, with log evidence.",
+      "estimated_minutes": 12,
+      "status": "available",
+      "concepts": ["failure-diagnosis", "timing"],
+      "prerequisites": ["d7-evidence-audit"],
+      "source_files": ["simulator/simulator.py", "src/testlab/client.py"],
+      "requirements": [],
+      "blocks": [
+        {
+          "type": "learn",
+          "id": "learn",
+          "text": "Real faults are rare and arrive on their own schedule — you cannot wait for a dropped connection to happen during your test run. So the DUT ships them as a feature: `--fault` injects one of five modes.\n\n- `delayed_response` — every answer arrives `--fault-delay-ms` late.\n- `dropped_connection` — the socket is closed mid-conversation.\n- `malformed_response` — the DUT sends bytes that are not JSON.\n- `startup_delay` — the DUT takes `--fault-delay-ms` to come up.\n- `process_termination` — the DUT process exits.\n\nEach engagement is logged as a `fault_injected` line: the fault is **deterministic and observable**.",
+          "more": "Fault injection is how test labs exercise the paths that almost never run: timeouts, reconnect logic, partial reads, crash recovery. If your error handling only runs when the world misbehaves, it is effectively untested — the first time it executes will be in production, against a real customer, at 3 a.m. The five modes here map to the classic failure taxonomy of a networked service: slow (delayed_response, startup_delay), silent (dropped_connection), corrupt (malformed_response), and dead (process_termination). The `fault_injected` log line matters as much as the fault itself: it turns 'the test was flaky' into 'the run at 14:03:11Z had a 400 ms injected delay', which is the difference between a shrug and a diagnosis."
+        },
+        {
+          "type": "predict",
+          "id": "predict",
+          "question": "You start the DUT with `--fault delayed_response --fault-delay-ms 400` and send a normal `status` request. What does the client see?",
+          "options": [
+            "Connection refused — the fault mode disables the listener",
+            "A correct status response, arriving roughly 400 ms later than usual",
+            "Malformed JSON after a 400 ms pause",
+            "The DUT exits after 400 ms"
+          ],
+          "answer_index": 1,
+          "reveal": "delayed_response changes WHEN the answer arrives, not WHAT it is: the payload is a normal status response, delayed by --fault-delay-ms. That distinction is the whole point — your timing assertions and client timeouts must tolerate the delay without mistaking it for a wrong answer."
+        },
+        {
+          "type": "do",
+          "id": "do",
+          "instructions": "Run the DUT with the delay fault and watch it engage. In one terminal (PowerShell):\n\n```python -m simulator.simulator --port 9780 --fault delayed_response --fault-delay-ms 400 --log-file evidence/logs/fault-delay.log --verbose\n```\n\nIn a second terminal, time a request from the client (activate `.venv` first):\n\n```python -c \"import time; from testlab.client import LabClient; c = LabClient('127.0.0.1', 9780); c.connect(); t = time.monotonic(); r = c.request({'command': 'status', 'sequence': 1}); print('elapsed_ms:', int((time.monotonic() - t) * 1000)); print(r.payload); c.close()\"\n```\n\n(`python -c` works identically in bash.) Note the elapsed time, then stop the DUT (Ctrl+C) and grep `evidence/logs/fault-delay.log` for `fault_injected`.",
+          "command": "python -m simulator.simulator --port 9780 --fault delayed_response --fault-delay-ms 400 --log-file evidence/logs/fault-delay.log --verbose"
+        },
+        {
+          "type": "verify",
+          "id": "verify",
+          "validator": "behavior_probe",
+          "mandatory": true,
+          "description": "Launches the DUT with the delayed_response fault at 400 ms, sends one status request, and proves both halves of the contract: the answer is correct (state READY) and it cannot arrive faster than the injected delay. The DUT log must also record the fault.",
+          "args": {
+            "dut_args": ["--fault", "delayed_response", "--fault-delay-ms", "400"],
+            "steps": [
+              { "send": { "command": "status", "sequence": 1 }, "expect": { "state": "READY" }, "min_elapsed_ms": 350 }
+            ],
+            "log_expect_regex": "fault_injected",
+            "success_note": "Deterministic fault engagement: correct payload, >= 350 ms on the wire, and fault_injected in the DUT log. The same command produces the same failure every run — that is why injection beats waiting for flakiness."
+          }
+        },
+        {
+          "type": "explain",
+          "id": "explain",
+          "question": "In your own words: why does a serious test lab inject faults deliberately instead of waiting for real flakiness to cover the same paths?",
+          "keywords": ["reproduc", "deterministic", "rare", "wait"],
+          "sample_answer": "Real faults are rare and nondeterministic, so waiting for them leaves error-handling paths effectively untested — they would first run in production. Injection makes each failure reproducible on demand, so timeout, reconnect, and crash paths are exercised every run."
+        }
+      ],
+      "hints": [
+        { "level": 1, "text": "The fault changes timing, not content — think about which assertion should still hold and which measurement should move." },
+        { "level": 2, "text": "Look at the argparse section of simulator/simulator.py for --fault and --fault-delay-ms, and find where the fault_injected log line is emitted." },
+        { "level": 3, "text": "Exact run: python -m simulator.simulator --port 9780 --fault delayed_response --fault-delay-ms 400 --log-file evidence/logs/fault-delay.log --verbose — then send one status request and check both elapsed time and the log." }
+      ]
+    },
+    {
+      "id": "d8-classify-failures",
+      "title": "Same red test, four different owners",
+      "objective": "Classify a failure as product, test, infrastructure, or configuration — before touching any code.",
+      "estimated_minutes": 10,
+      "status": "available",
+      "concepts": ["failure-diagnosis"],
+      "prerequisites": ["d8-fault-modes"],
+      "source_files": ["simulator/simulator.py", "src/testlab/client.py"],
+      "requirements": [],
+      "blocks": [
+        {
+          "type": "learn",
+          "id": "learn",
+          "text": "A red test is a **symptom**, not a diagnosis. Four classes, four owners:\n\n- **Product defect** — the DUT is wrong. Owner: the product team.\n- **Test defect** — the assertion or harness is wrong. Owner: you.\n- **Infrastructure** — the machine, network, or CI runner failed. Owner: whoever runs the lab.\n- **Configuration** — the run was set up to behave this way (including an injected fault). Owner: whoever wrote the run configuration.\n\nClassifying before fixing is the whole job: the same stack trace demands four different actions.",
+          "more": "The expensive mistake is misclassification, not the failure itself. Treating an injected-fault configuration failure as a product defect sends someone hunting through DUT code for a bug that does not exist; treating a real product defect as 'flaky infrastructure' teaches the team to ignore red tests, which is how regression suites die. The discipline that separates them is evidence: what did the run configuration say, what does the DUT log show, and does the failure reproduce without the fault? This is why the previous lesson's fault_injected line matters — it is the smoking gun that moves a failure from 'product' to 'configuration' in one grep. In an interview, 'how do you triage a failing test?' is asking for exactly this taxonomy, in this order."
+        },
+        {
+          "type": "predict",
+          "id": "predict",
+          "question": "A test fails only on the CI runner, and the runner's disk filled up mid-run, truncating the evidence files. Which class?",
+          "options": [
+            "Product defect — the DUT should handle low disk",
+            "Test defect — the test should assert less",
+            "Infrastructure — the environment running the test failed",
+            "Configuration — the runner was misconfigured"
+          ],
+          "answer_index": 2,
+          "reveal": "Nothing in the product, the test, or its configuration caused this: the machine the run depended on failed underneath it. Infrastructure failures get retried and their owners paged — they never become code changes in the DUT."
+        },
+        {
+          "type": "do",
+          "id": "do",
+          "instructions": "Manufacture the configuration class yourself. Start the DUT with the malformed-response fault:\n\n```python -m simulator.simulator --port 9781 --fault malformed_response --log-file evidence/logs/fault-malformed.log --verbose\n```\n\nThen send one request from a second terminal and watch the client choke:\n\n```python -c \"from testlab.client import LabClient; c = LabClient('127.0.0.1', 9781); c.connect(); c.request({'command': 'status', 'sequence': 1})\"\n```\n\nRead the traceback, then grep `evidence/logs/fault-malformed.log` for `fault_injected`. Now the triage question: the client crashed — who owns this failure? Check the DUT log, note that the DUT process is still alive and serving, and classify it before running the check below.",
+          "command": "python -m simulator.simulator --port 9781 --fault malformed_response --log-file evidence/logs/fault-malformed.log --verbose"
+        },
+        {
+          "type": "verify",
+          "id": "verify",
+          "validator": "behavior_probe",
+          "mandatory": true,
+          "description": "The client sees garbage — classify it. The DUT is launched with the malformed_response fault and must answer one status request with bytes that are not valid JSON. The DUT's core logic is intact; the corruption is this run's configuration.",
+          "args": {
+            "dut_args": ["--fault", "malformed_response"],
+            "steps": [
+              { "send": { "command": "status", "sequence": 1 }, "expect_invalid_json": true }
+            ],
+            "success_note": "Confirmed: the wire carried non-JSON bytes. If a client test failed here, the owner is the run configuration (injected fault), not the DUT and not the client — the fault_injected log line is the proof."
+          }
+        },
+        {
+          "type": "quiz",
+          "id": "quiz",
+          "question": "A timing assertion fails: `response took 412 ms, over the 100 ms budget`. The run started the DUT with `--fault delayed_response --fault-delay-ms 400`, and the response payload was completely correct. Which classification — and which action?",
+          "options": [
+            "Product defect — file a bug against the DUT's response latency",
+            "Test defect — the assertion threshold is wrong and must be raised",
+            "Configuration — the injected fault explains the latency; the run did exactly what it was configured to do",
+            "Infrastructure — the test machine was too slow"
+          ],
+          "answer_index": 2,
+          "explanation": "The DUT answered correctly and slowly because the run configuration told it to. No product code changes, no test changes, no new hardware — the failure is a property of this run's configuration. (A subtler reading: if the test was not MEANT to run with the fault, the defect is in whoever paired this test with that configuration — still configuration, not product.)"
+        },
+        {
+          "type": "explain",
+          "id": "explain",
+          "question": "Give one concrete check that distinguishes a product defect from an injected-fault configuration issue.",
+          "keywords": ["fault", "config", "without"],
+          "sample_answer": "Re-run the identical request against the DUT started without any --fault or --fault-config flags. If the response is clean without the fault configuration, the failure belongs to the injected configuration; if it still fails, you have a genuine product defect."
+        }
+      ],
+      "hints": [
+        { "level": 1, "text": "Ask who would have to change something to make it green: the product team, the test author, the lab operator, or the run's config." },
+        { "level": 2, "text": "The fault_injected line in the DUT log is the classification evidence — grep evidence/logs/fault-malformed.log for it." },
+        { "level": 3, "text": "The decisive experiment is a control run: start the DUT with no fault flags and repeat the exact same request. Compare outcomes; the difference is the fault's, everything in common is the product's." }
+      ]
+    },
+    {
+      "id": "d8-config-driven-faults",
+      "title": "Fault configuration as a file",
+      "objective": "Drive fault injection from a JSON manifest (--fault-config) and prove the file alone controls the run.",
+      "estimated_minutes": 12,
+      "status": "available",
+      "concepts": ["failure-diagnosis", "requirements-evidence"],
+      "prerequisites": ["d8-classify-failures"],
+      "source_files": ["simulator/simulator.py", "src/testlab/client.py"],
+      "requirements": [],
+      "blocks": [
+        {
+          "type": "learn",
+          "id": "learn",
+          "text": "`--fault` selects one mode on the command line. `--fault-config PATH` selects a **manifest**: a JSON object of fault switches applied together.\n\n```\n{\"response_delay_ms\": 0, \"drop_connection\": false, \"malformed_response\": false, \"startup_delay_ms\": 0, \"exit_after_requests\": null}\n```\n\nZero/disabled values mean 'no fault'. Any key you set takes over that aspect of the run. The file is the difference that matters: it can be committed, diffed, attached to a bug report, and replayed with one flag — the fault setup becomes **evidence**, not folklore.",
+          "more": "exit_after_requests is the interesting one: it kills the DUT process after N requests, which is how you test reconnect logic and crash recovery without a chaos monkey. Note the design contrast with editing fault behavior into simulator.py: a code edit changes the product under test, is invisible to code review as data, and gets left behind by accident; a config file is reviewed, versioned, and deleted when the experiment ends. In a real lab, fault manifests live next to the test plan so an auditor can answer 'exactly which faults were active during the run that produced this evidence?' by reading one file. That traceability is why this lesson is tagged requirements-evidence, not just failure-diagnosis."
+        },
+        {
+          "type": "predict",
+          "id": "predict",
+          "question": "Given `{\"response_delay_ms\": 250, \"drop_connection\": true}` as the fault config, what does a client's first status request see?",
+          "options": [
+            "An immediate connection drop — drop_connection overrides the delay",
+            "A correct response after about 250 ms, then the connection drops",
+            "Malformed JSON after 250 ms",
+            "The DUT refuses to start with conflicting faults"
+          ],
+          "answer_index": 0,
+          "reveal": "The drop wins, and it wins immediately. Read the handler in `simulator/simulator.py`: `drop_connection` is checked as soon as the line arrives — before the request is decoded, and before `response_delay_ms` is applied — and it returns, closing the connection. The delay never runs because there is no longer a response to delay. (Measured: the client sees a closed socket in ~15 ms, not 250.)\n\nThat is the real lesson about composed faults. A manifest lets you set several switches, but the handler's *order* decides which ones can still matter: a terminal fault upstream turns everything downstream into dead configuration. When you write a fault manifest, read the code path rather than the field list — otherwise you will believe you exercised a delay that never ran."
+        },
+        {
+          "type": "do",
+          "id": "do",
+          "instructions": "Build the manifest and run it. First create the config file (PowerShell; in bash, `mkdir -p evidence/exercises` and the same Set-Content line works via `echo`):\n\n```New-Item -ItemType Directory -Force evidence\\exercises\nSet-Content evidence\\exercises\\fault-drop.json '{\"drop_connection\":true}'\n```\n\nStart the DUT from the manifest:\n\n```python -m simulator.simulator --port 9782 --fault-config evidence/exercises/fault-drop.json --log-file evidence/logs/fault-drop.log --verbose\n```\n\nThen send a request from a second terminal and watch the connection drop underneath the client:\n\n```python -c \"from testlab.client import LabClient; c = LabClient('127.0.0.1', 9782); c.connect(); c.request({'command': 'status', 'sequence': 1})\"\n```\n\nRead the client's error, then confirm the cause in `evidence/logs/fault-drop.log` (`fault_injected`). The check below will replay your manifest — it only passes because your file exists and says `drop_connection: true`.",
+          "command": "Set-Content evidence\\exercises\\fault-drop.json '{\"drop_connection\":true}'"
+        },
+        {
+          "type": "verify",
+          "id": "verify",
+          "validator": "behavior_probe",
+          "mandatory": true,
+          "description": "Replays the learner's own manifest: the DUT is launched with --fault-config evidence/exercises/fault-drop.json and must accept one status request, then close the connection with no response. This only passes once your config file exists and enables drop_connection.",
+          "args": {
+            "dut_args": ["--fault-config", "evidence/exercises/fault-drop.json"],
+            "steps": [
+              { "send": { "command": "status", "sequence": 1 }, "expect_closed": true }
+            ],
+            "success_note": "Your fault-drop.json drove the run: the DUT accepted the request and dropped the connection on cue. One JSON file now encodes the entire fault setup — replayable by anyone, with no code edits."
+          }
+        },
+        {
+          "type": "explain",
+          "id": "explain",
+          "question": "Why do configuration-driven faults beat code-edited faults for reproducibility?",
+          "keywords": ["config", "reproduc", "manifest"],
+          "sample_answer": "The config file is a manifest of exactly which faults were active: it can be committed, diffed, reviewed, and replayed with one flag, so anyone can reproduce the run. Editing fault behavior into the DUT code changes the product under test and leaves no standalone record of the fault setup."
+        }
+      ],
+      "hints": [
+        { "level": 1, "text": "The manifest is plain JSON: the keys are the fault names from the learn block, the values turn them on. You only need one switch." },
+        { "level": 2, "text": "Create evidence/exercises/fault-drop.json and pass it as --fault-config. The key you want is drop_connection — see the argparse / fault-config handling in simulator/simulator.py." },
+        { "level": 3, "text": "Exact file content for evidence/exercises/fault-drop.json: {\"drop_connection\":true} — one line, nothing else." },
+        { "level": 4, "text": "Full solution: New-Item -ItemType Directory -Force evidence\\exercises; Set-Content evidence\\exercises\\fault-drop.json '{\"drop_connection\":true}'; then python -m simulator.simulator --port 9782 --fault-config evidence/exercises/fault-drop.json --log-file evidence/logs/fault-drop.log --verbose" }
+      ]
+    }
+  ]
+}

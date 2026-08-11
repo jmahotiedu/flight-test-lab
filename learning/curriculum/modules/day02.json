@@ -1,0 +1,255 @@
+{
+  "lessons": [
+    {
+      "id": "d2-json-protocol-anatomy",
+      "title": "Anatomy of the line-delimited JSON protocol",
+      "objective": "Read the wire protocol precisely — one JSON object per line, dicts in, dicts out, sequence IDs echoed back — and prove it with a hand-built socket request.",
+      "estimated_minutes": 9,
+      "concepts": ["protocol-design"],
+      "prerequisites": ["d1-argparse-logging"],
+      "source_files": ["simulator/simulator.py", "src/testlab/client.py"],
+      "requirements": [],
+      "blocks": [
+        {
+          "type": "learn",
+          "id": "learn",
+          "text": "The protocol is **line-delimited JSON**: each request is one JSON object terminated by `\\n`, each response is one JSON object terminated by `\\n`. The newline is the frame boundary — it is how the server knows a request is complete.\n\nEvery message is a dict. Requests carry `command` plus an optional `sequence`; responses echo `sequence` back unchanged. That echo is what lets a client match responses to requests — the standard correlation-ID pattern.\n\n`json.dumps(..., sort_keys=True)` on both sides keeps the wire deterministic, so logs and captures diff cleanly.",
+          "more": "Why line-delimited instead of length-prefixed or EOF-terminated? TCP is a byte stream with no message boundaries, so every protocol must invent framing. A newline delimiter is trivially debuggable with netcat, works with `readline()` on both ends, and survives partial reads — `DutRequestHandler.handle()` just loops on `self.rfile.readline()`. The `sequence` echo is the same idea you will see in real test equipment protocols (SCPI transactions, MAVLink sequence fields): the requester stamps an ID, the responder copies it, and any mismatch or gap is immediately visible in evidence. Note that JSON objects are unordered — `{'status': 'ok', 'state': 'READY'}` and `{'state': 'READY', 'status': 'ok'}` are the same message. Tests must compare dicts, never raw strings."
+        },
+        {
+          "type": "predict",
+          "id": "predict",
+          "question": "You send {\"command\": \"status\", \"sequence\": 42} and the DUT replies {\"sequence\": 42, \"state\": \"READY\", \"status\": \"ok\"} — keys in a different order than you expected. Is this a protocol violation?",
+          "options": [
+            "Yes — field order is part of the protocol contract",
+            "Yes — the client must resend and demand canonical order",
+            "No — JSON objects are unordered; dict equality is what matters",
+            "No — but only because sort_keys=True happened to be set"
+          ],
+          "answer_index": 2,
+          "reveal": "JSON object member order carries no semantics. The server sorts keys on the wire only for deterministic logs, not because order means anything. This is why the test suite asserts whole-dict equality (response.payload == {...}) instead of comparing response strings — string comparison would make every test hostage to serialization details."
+        },
+        {
+          "type": "do",
+          "id": "do",
+          "instructions": "Speak the protocol with your own hands — no LabClient, just a raw socket.\n\nTerminal 1 — start the DUT:\n\n```python -m simulator.simulator --port 9780 --log-file evidence/logs/manual-protocol.log --verbose\n```\n\nTerminal 2 — REPL (`python` from `.venv`):\n\n```import socket, json\nc = socket.create_connection(('127.0.0.1', 9780), timeout=2.0)\nc.sendall(b'{\"command\": \"status\", \"sequence\": 42}\\n')\nreader = c.makefile('r', encoding='utf-8', newline='\\n')\nprint(json.loads(reader.readline()))\nc.close()\n```\n\nObserve the echoed `sequence: 42`, then open `evidence/logs/manual-protocol.log` and find the matching `request` / `response` pair.\n\n(bash equivalent: `printf '{\"command\": \"status\", \"sequence\": 42}\\n' | nc 127.0.0.1 9780`)",
+          "command": "python -m simulator.simulator --port 9780 --log-file evidence/logs/manual-protocol.log --verbose"
+        },
+        {
+          "type": "verify",
+          "id": "verify",
+          "validator": "behavior_probe",
+          "mandatory": true,
+          "description": "Launches the real DUT and sends exactly the request you just sent by hand, asserting the echoed sequence and the READY state — then confirms the exchange was logged.",
+          "args": {
+            "steps": [
+              { "send": { "command": "status", "sequence": 42 }, "expect": { "status": "ok", "state": "READY", "sequence": 42 }, "max_elapsed_ms": 1000 }
+            ],
+            "log_expect_regex": "request peer=127\\.0\\.0\\.1:\\d+ payload=.*status",
+            "success_note": "One line in, one line out: the DUT echoed sequence 42 and reported READY, and the log holds the matching request/response pair. That is the whole protocol contract for a happy-path transaction."
+          }
+        },
+        {
+          "type": "explain",
+          "id": "explain",
+          "question": "Why does every request have to end with a newline — what breaks if you omit it?",
+          "keywords": ["newline", "delimiter", "frame", "readline"],
+          "sample_answer": "TCP is a byte stream with no message boundaries, so the newline is the frame delimiter. The handler blocks in readline() until one arrives; without it the server cannot know the request is complete and simply waits — the request never gets a response."
+        }
+      ],
+      "hints": [
+        { "level": 1, "text": "Think about framing: TCP delivers a stream of bytes, so something in the protocol has to say where one message ends." },
+        { "level": 2, "text": "Read DutRequestHandler.handle() in simulator/simulator.py — the while loop on self.rfile.readline() is the framing, and build_response() is the message logic." },
+        { "level": 3, "text": "Raw-wire shape: sendall(b'{\"command\": \"status\", \"sequence\": 42}\\n'), then read one line back and json.loads it. If you get nothing, check the trailing \\n in the bytes literal." }
+      ]
+    },
+    {
+      "id": "d2-error-codes-validation",
+      "title": "Error codes: how build_response() rejects bad input",
+      "objective": "Trigger all three error paths in build_response() and prove the DUT survives every one of them.",
+      "estimated_minutes": 10,
+      "concepts": ["protocol-design"],
+      "prerequisites": ["d2-json-protocol-anatomy"],
+      "source_files": ["simulator/simulator.py"],
+      "requirements": ["REQ-PROTO-001"],
+      "blocks": [
+        {
+          "type": "learn",
+          "id": "learn",
+          "text": "`build_response()` has exactly three rejection paths, in guard order:\n\n1. **INVALID_MESSAGE_TYPE** — the decoded JSON is not a dict (a list, a string). No `sequence` can be extracted, so the error carries a `message` instead.\n2. **MISSING_COMMAND** — a dict without `command`; the error echoes `sequence`.\n3. **UNSUPPORTED_COMMAND** — an unrecognized `command`; the error echoes **both** `command` and `sequence` so the client can see exactly what was rejected.\n\nAll three return an error dict. None of them raises. Rejection is data, not control flow — that is what keeps the handler loop alive.",
+          "more": "The guard order is load-bearing: the isinstance check must come first because `message.get('command')` would raise AttributeError on a non-dict, turning a bad client request into a server-side exception. Echoing back what was rejected is deliberate protocol design — when a test fails at 3 a.m. you want the evidence to say 'you asked for launch, which does not exist', not just 'error'. This mirrors REQ-PROTO-001: reject without terminating. Note the fourth error path, INVALID_JSON, lives one level up in the handler (json.loads failure) because at that point there is no message to pass to build_response() — the day 3 lesson dissects that boundary."
+        },
+        {
+          "type": "predict",
+          "id": "predict",
+          "question": "What does build_response(\"status\") return — note the argument is a string, not a dict?",
+          "options": [
+            "{\"status\": \"ok\", \"state\": \"READY\", \"sequence\": null} — it treats the string as the command",
+            "{\"status\": \"error\", \"error_code\": \"INVALID_MESSAGE_TYPE\", ...}",
+            "It raises TypeError",
+            "{\"status\": \"error\", \"error_code\": \"MISSING_COMMAND\", \"sequence\": null}"
+          ],
+          "answer_index": 1,
+          "reveal": "The isinstance guard runs before anything calls .get() on the message, so a string is rejected as INVALID_MESSAGE_TYPE with no sequence. If that guard were missing, 'status'.get would raise AttributeError inside a request handler thread — one malformed request would kill that client's handler with a traceback instead of a protocol answer."
+        },
+        {
+          "type": "do",
+          "id": "do",
+          "instructions": "Trigger all three error paths against a live DUT.\n\nTerminal 1:\n\n```python -m simulator.simulator --port 9781 --log-file evidence/logs/manual-errors.log --verbose\n```\n\nTerminal 2 — REPL:\n\n```from testlab.client import LabClient\nwith LabClient('127.0.0.1', 9781) as c:\n    print(c.request({'sequence': 7}).payload)                    # MISSING_COMMAND\n    print(c.request({'command': 'launch', 'sequence': 8}).payload)  # UNSUPPORTED_COMMAND\n    print(c.request({'command': 'status', 'sequence': 9}).payload)  # DUT still alive\n```\n\nINVALID_MESSAGE_TYPE needs a non-dict JSON value, which LabClient does not send — go raw:\n\n```import socket, json\ns = socket.create_connection(('127.0.0.1', 9781), timeout=2.0)\ns.sendall(b'[1, 2, 3]\\n')\nr = s.makefile('r', encoding='utf-8', newline='\\n')\nprint(json.loads(r.readline()))\ns.close()\n```\n\nConfirm all four responses, then find each one in `evidence/logs/manual-errors.log`.",
+          "command": "python -m simulator.simulator --port 9781 --log-file evidence/logs/manual-errors.log --verbose"
+        },
+        {
+          "type": "verify",
+          "id": "verify",
+          "validator": "behavior_probe",
+          "mandatory": true,
+          "description": "Replays the error sequence against a fresh DUT on one connection: MISSING_COMMAND, then UNSUPPORTED_COMMAND, then a status request that must still succeed — proving rejection never terminates the DUT.",
+          "args": {
+            "steps": [
+              { "send": { "sequence": 7 }, "expect": { "status": "error", "error_code": "MISSING_COMMAND", "sequence": 7 } },
+              { "send": { "command": "launch", "sequence": 8 }, "expect": { "status": "error", "error_code": "UNSUPPORTED_COMMAND", "command": "launch", "sequence": 8 } },
+              { "send": { "command": "status", "sequence": 9 }, "expect": { "state": "READY" } }
+            ],
+            "success_note": "Both error codes carried their full context (command and sequence echoed), and the follow-up status request returned READY on the same connection — rejection is survivable, exactly as REQ-PROTO-001 demands."
+          }
+        },
+        {
+          "type": "explain",
+          "id": "explain",
+          "question": "Why does the DUT answer a malformed request with an error response instead of closing the connection or letting the exception propagate?",
+          "keywords": ["survive", "error", "robust", "terminate"],
+          "sample_answer": "The DUT must survive bad input (REQ-PROTO-001): one broken client must not kill a shared device. Returning an error dict keeps the handler loop alive for the next request and gives the client machine-readable evidence of what was rejected; an exception would tear down the connection and lose the diagnostic."
+        }
+      ],
+      "hints": [
+        { "level": 1, "text": "Count the return statements in build_response() that set status: 'error' — each is one path, and the order of the guards matters." },
+        { "level": 2, "text": "simulator/simulator.py, build_response(): the isinstance check is path 1, 'command is None' is path 2, the final fallthrough return is path 3. Compare with tests/test_protocol.py, which already exercises paths 2 and 3." },
+        { "level": 3, "text": "Trigger shape: {'sequence': 7} -> MISSING_COMMAND; {'command': 'launch', 'sequence': 8} -> UNSUPPORTED_COMMAND; a raw b'[1, 2, 3]\\n' -> INVALID_MESSAGE_TYPE. Then a normal status request proves survival." }
+      ]
+    },
+    {
+      "id": "d2-add-ping-test-first",
+      "title": "Add a ping command, test-first",
+      "objective": "Extend the protocol with a ping command driven by REQ-PROTO-003: write the failing test first, then implement the minimal change in build_response().",
+      "estimated_minutes": 20,
+      "concepts": ["protocol-design", "pytest"],
+      "prerequisites": ["d2-error-codes-validation"],
+      "source_files": ["tests/test_ping.py", "tests/test_status.py", "simulator/simulator.py"],
+      "requirements": ["REQ-PROTO-003"],
+      "blocks": [
+        {
+          "type": "learn",
+          "id": "learn",
+          "text": "Test-first means the test is the executable form of the requirement: REQ-PROTO-003 says a `ping` command returns `{\"status\": \"ok\", \"reply\": \"pong\", \"sequence\": N}`. You write that as a pytest function **before** the behavior exists.\n\nThen you run it and watch it **fail for the right reason** — the DUT answers `UNSUPPORTED_COMMAND`, proving the test really observes the missing behavior. A test that fails at collection time (typo, bad import) proves nothing.\n\nOnly then do you implement the smallest change that turns it green: one branch in `build_response()`.",
+          "more": "The red step is a falsification control. A test you never saw fail might be green for the wrong reason — asserting a dict that is always equal to itself, hitting the wrong fixture, never executing at all. Watching it fail with the *expected* diff (wanted reply pong, got error UNSUPPORTED_COMMAND) validates the test and the requirement in one move; the green run then validates the implementation. This is the discipline behind the `@pytest.mark.requirement(\"REQ-PROTO-003\")` marker too — but note the order the exercise puts it in: the requirement gets **declared in the register first**, because a marker naming an ID that exists nowhere is a dangling reference that looks like traceability and proves nothing. `--strict-markers` catches an unregistered *marker name*; nothing in pytest checks that the ID inside it is real. That is why the exercise ends by adding the traceability row too, closing requirement → test → evidence (Day 7 goes deeper). The implementation itself is deliberately boring — a second `if command ==` branch next to `status`, returning the echoed `sequence`. If your implementation touches anything else, it is bigger than the requirement."
+        },
+        {
+          "type": "predict",
+          "id": "predict",
+          "question": "You have written tests/test_ping.py but have not touched simulator.py yet. What should `python -m pytest tests/test_ping.py -v` report?",
+          "options": [
+            "PASS — the DUT might already support ping",
+            "FAIL — the assertion shows the DUT returned UNSUPPORTED_COMMAND",
+            "ERROR — the test cannot collect because ping does not exist",
+            "SKIP — the requirement marker skips unimplemented commands"
+          ],
+          "answer_index": 1,
+          "reveal": "The test collects fine (it only references the client and a dict), sends ping, and the DUT — which knows only status — replies UNSUPPORTED_COMMAND. The assertion diff is your evidence that the test observes the gap. Anything else (collection error, unexpected pass) means the test itself is wrong and must be fixed before you write any DUT code."
+        },
+        {
+          "type": "do",
+          "id": "do",
+          "instructions": "1. **Declare the requirement before you test it.** REQ-PROTO-003 does not exist yet — a marker pointing at an undeclared ID is a dangling reference, not traceability. Add this row to `requirements/software_requirements.csv`:\n\n```REQ-PROTO-003,Ping command,\"The DUT shall answer a ping command with reply pong and the request's sequence.\",Test,\"A ping request returns status ok, reply pong, and the same sequence value.\"\n```\n\n2. Create `tests/test_ping.py` modeled on `tests/test_status.py`: one test, the `lab_client` fixture, `@pytest.mark.requirement(\"REQ-PROTO-003\")`, asserting the full payload dict. (Hint level 3 has the exact content if you want it.)\n\n3. Run it and READ the failure:\n\n```python -m pytest tests/test_ping.py -v\n```\n\nThe failure must show the DUT answered `UNSUPPORTED_COMMAND` — that is the correct red.\n\n4. Run the **v-fail-first** check below now, before touching the simulator. It passes only if the test fails.\n\n5. Implement: in `simulator/simulator.py`, add a `ping` branch to `build_response()` next to the `status` branch, returning `{\"status\": \"ok\", \"reply\": \"pong\", \"sequence\": sequence}`.\n\n6. Close the chain — add the mapping row to `requirements/traceability.csv`:\n\n```REQ-PROTO-003,tests/test_ping.py::test_ping_returns_pong,evidence/junit/test-results.xml\n```\n\n7. Re-run pytest — green — then run the remaining checks below.",
+          "command": "python -m pytest tests/test_ping.py -v"
+        },
+        {
+          "type": "verify",
+          "id": "v-fail-first",
+          "validator": "pytest_check",
+          "mandatory": true,
+          "historical": true,
+          "description": "Run this IMMEDIATELY after writing the test, BEFORE editing simulator.py. This check passes only if tests/test_ping.py FAILS — that deliberate red is the evidence your test can see the missing behavior. If this check fails because the test passed, ping is either already implemented or your test asserts nothing; fix that before implementing. Once it has passed, that result stands: implementing ping makes this test green, so re-running the check afterwards reports red — truthfully — without revoking the lesson. A red stage records something that happened, not something that has to stay true.",
+          "args": {
+            "nodeids": ["tests/test_ping.py"],
+            "expect": "fail",
+            "junit_contains": ["ping"],
+            "require_assertion_failure": true,
+            "expect_stdout_regex": "UNSUPPORTED_COMMAND",
+            "success_note": "Red for the right reason: the test ran, reached its assertion, and the diff shows the DUT answered UNSUPPORTED_COMMAND. A collection or fixture error would have been nonzero too and proved nothing."
+          }
+        },
+        {
+          "type": "verify",
+          "id": "v-pass",
+          "validator": "pytest_check",
+          "mandatory": true,
+          "description": "Run this AFTER implementing the ping branch in build_response(). The same test that failed a minute ago must now pass — same test, same assertions, only the DUT changed.",
+          "args": {
+            "nodeids": ["tests/test_ping.py"],
+            "expect": "pass",
+            "junit_contains": ["ping"]
+          }
+        },
+        {
+          "type": "verify",
+          "id": "v-behavior",
+          "validator": "behavior_probe",
+          "mandatory": true,
+          "description": "Independent of pytest: launches the real DUT and speaks raw protocol to it, proving the ping behavior exists on the wire — not just inside a test process.",
+          "args": {
+            "steps": [
+              { "send": { "command": "ping", "sequence": 3 }, "expect": { "status": "ok", "reply": "pong", "sequence": 3 }, "max_elapsed_ms": 1000 }
+            ],
+            "success_note": "ping -> pong with the sequence echoed, verified against a live DUT over a real socket. The test and the wire agree: REQ-PROTO-003 is implemented."
+          }
+        },
+        {
+          "type": "verify",
+          "id": "v-requirement-declared",
+          "validator": "artifact_check",
+          "mandatory": true,
+          "description": "Checks that REQ-PROTO-003 is declared as a complete row — title, shall-statement, verification method and acceptance criteria. An ID with empty columns is a placeholder, not a requirement.",
+          "args": {
+            "file": "requirements/software_requirements.csv",
+            "csv_row_matches": {
+              "requirement_id": "^REQ-PROTO-003$",
+              "title": "\\S",
+              "requirement": "(?i)shall",
+              "verification_method": "\\S",
+              "acceptance_criteria": "\\S"
+            },
+            "success_note": "REQ-PROTO-003 is a declared requirement, so the marker on your test points at something real."
+          }
+        },
+        {
+          "type": "verify",
+          "id": "v-traceability-row",
+          "validator": "artifact_check",
+          "mandatory": true,
+          "description": "Parses traceability.csv and requires one complete row: REQ-PROTO-003 mapped to your ping test's node ID and the JUnit evidence file. A row naming the wrong test would be an unusable map.",
+          "args": {
+            "file": "requirements/traceability.csv",
+            "csv_row_matches": {
+              "requirement_id": "^REQ-PROTO-003$",
+              "test_case": "^tests/test_ping\\.py::\\S+$",
+              "evidence": "^evidence/junit/test-results\\.xml$"
+            },
+            "success_note": "The chain is closed: REQ-PROTO-003 is declared, verified by a test, and mapped to the evidence that test produces. Day 7 goes deeper on this."
+          }
+        },
+        {
+          "type": "explain",
+          "id": "explain",
+          "question": "Why write the test before the implementation, instead of implementing ping and then writing a test to match?",
+          "keywords": ["fail", "specification"],
+          "sample_answer": "The test is the executable specification of the requirement; writing it first and watching it fail for the right reason proves the test actually detects the missing behavior. A test written after the code is fitted to the implementation and may pass without ever proving anything about the requirement."
+        }
+      ],
+      "hints": [
+        { "level": 1, "text": "Red before green: the failing run is not an obstacle, it is the evidence that your test can detect the missing behavior. Only then is the green run meaningful." },
+        { "level": 2, "text": "Model the test on tests/test_status.py (same lab_client fixture, one request, assert the whole payload dict). Implement in simulator/simulator.py, build_response() — add a branch next to 'if command == \"status\"'." },
+        { "level": 3, "text": "tests/test_ping.py:\n\n```\"\"\"Ping command tests (REQ-PROTO-003).\"\"\"\n\nfrom __future__ import annotations\n\nimport pytest\n\nfrom testlab.client import LabClient\n\n\n@pytest.mark.requirement(\"REQ-PROTO-003\")\ndef test_ping_returns_pong(lab_client: LabClient) -> None:\n    response = lab_client.request({\"command\": \"ping\", \"sequence\": 3})\n    assert response.payload == {\"status\": \"ok\", \"reply\": \"pong\", \"sequence\": 3}\n```\n\nbuild_response() branch:\n\n```    if command == \"ping\":\n        return {\"status\": \"ok\", \"reply\": \"pong\", \"sequence\": sequence}\n```" }
+      ]
+    }
+  ]
+}

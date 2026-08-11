@@ -1,0 +1,182 @@
+{
+  "lessons": [
+    {
+      "id": "d1-import-no-side-effects",
+      "title": "Imports must not start the server",
+      "objective": "Understand why importing simulator.simulator does not start the TCP server — and prove it by observation.",
+      "estimated_minutes": 7,
+      "concepts": ["python-runtime"],
+      "prerequisites": [],
+      "source_files": ["simulator/simulator.py"],
+      "flow": "simulator_execution",
+      "requirements": [],
+      "blocks": [
+        {
+          "type": "learn",
+          "id": "learn",
+          "text": "When Python loads `simulator/simulator.py`, it executes the file top to bottom and stores the module's name in the dunder variable `__name__`.\n\n- Imported (`import simulator.simulator`): `__name__` is `\"simulator.simulator\"`.\n- Executed (`python -m simulator.simulator`): `__name__` is `\"__main__\"`.\n\nThe last two lines of the file start the server **only** in the second case. That is the entire reason the test harness can import `build_response()` without a server appearing.",
+          "more": "`__name__` is set by the import system before the module body runs. `python -m pkg.mod` locates the module and executes it with `__name__ = \"__main__\"`, exactly as if it were a script — which is why the README can say `python -m simulator.simulator`. The idiom `if __name__ == \"__main__\":` is therefore not boilerplate: it is the boundary between *library* (safe to import) and *program* (acquires resources, opens sockets, blocks forever). Any top-level code — a print, a socket bind, a `serve_forever()` — would run at import time in every test process."
+        },
+        {
+          "type": "predict",
+          "id": "predict",
+          "question": "After `import simulator.simulator as s`, what does `s.__name__` contain?",
+          "options": ["\"__main__\"", "\"simulator.simulator\"", "\"simulator\"", "None"],
+          "answer_index": 1,
+          "reveal": "The import system sets `__name__` to the fully qualified module name, `\"simulator.simulator\"`. `\"__main__\"` only appears when the file is executed directly. The check below proves it — and proves the import returns immediately instead of blocking on serve_forever()."
+        },
+        {
+          "type": "do",
+          "id": "do",
+          "instructions": "Open a Python REPL in the repo (activate `.venv` first) and run:\n\n```import simulator.simulator as s\nprint(s.__name__)\nprint(s.build_response({\"command\": \"status\", \"sequence\": 1}))\n```\n\nObserve: the import returns instantly, and you can call `build_response()` with no server running.",
+          "command": ".venv\\Scripts\\python"
+        },
+        {
+          "type": "verify",
+          "id": "verify",
+          "validator": "python_probe",
+          "mandatory": true,
+          "description": "This check imports the simulator in a fresh Python process and prints `__name__`. If importing started the server, the process would never exit and the check would time out.",
+          "args": {
+            "snippet": "import simulator.simulator as s\nprint('name:', s.__name__)\nprint(s.build_response({'command': 'status', 'sequence': 1}))",
+            "expect_stdout_regex": "name: simulator\\.simulator\\n\\{'status': 'ok'",
+            "timeout_seconds": 8,
+            "success_note": "Import was side-effect free: __name__ is the module path, build_response() works with no server, and the process exited immediately."
+          }
+        },
+        {
+          "type": "explain",
+          "id": "explain",
+          "question": "In your own words: why didn't importing the simulator start the TCP server?",
+          "keywords": ["__main__", "guard", "import"],
+          "sample_answer": "The server only starts under the `if __name__ == \"__main__\":` guard. On import, `__name__` is the module path, so the guard body is skipped and the file just defines functions and classes."
+        }
+      ],
+      "hints": [
+        { "level": 1, "text": "Think about who sets __name__, and to what, in each of the two ways the file can be loaded." },
+        { "level": 2, "text": "Read the last two lines of simulator/simulator.py — that guard is the whole mechanism." },
+        { "level": 3, "text": "Try `python -c \"import simulator.simulator; print(simulator.simulator.__name__)\"` and then `python -m simulator.simulator --port 9999` (Ctrl+C to stop) and compare." }
+      ]
+    },
+    {
+      "id": "d1-main-entrypoint",
+      "title": "main(), SystemExit, and the exit-code contract",
+      "objective": "Trace how main()'s return value becomes the process exit code, and why CI depends on it.",
+      "estimated_minutes": 10,
+      "concepts": ["python-runtime", "ci-cd"],
+      "prerequisites": ["d1-import-no-side-effects"],
+      "source_files": ["simulator/simulator.py"],
+      "requirements": [],
+      "blocks": [
+        {
+          "type": "learn",
+          "id": "learn",
+          "text": "`main()` returns an `int`. The final line `raise SystemExit(main())` turns that return value into the **process exit code**: 0 means success, anything else means failure. Raising `SystemExit(\"some message\")` prints the message to stderr and exits with code 1.\n\nBefore opening any socket, `main()` validates the port: `--port 70000` is rejected with SystemExit *before* resources are acquired. Validation before acquisition is a deliberate ordering.",
+          "more": "Exit codes are the only channel CI runners see: a GitHub Actions step fails if and only if the process exits nonzero. pytest, ruff, and mypy all honor the same contract. argparse uses exit code 2 for command-line errors (e.g. `--port abc`), distinct from the application's 1 — a small but useful diagnostic signal. Note also that `raise SystemExit(main())` at module bottom runs only under the `__main__` guard from the previous lesson."
+        },
+        {
+          "type": "predict",
+          "id": "predict",
+          "question": "What exit code does `python -m simulator.simulator --port 70000` produce?",
+          "options": ["0 — the OS clamps the port", "1 — SystemExit from main()", "2 — argparse rejects it", "It hangs waiting for a client"],
+          "answer_index": 1,
+          "reveal": "argparse happily parses 70000 as an int; the range check lives in main(), which raises SystemExit with a message — exit code 1. (argparse exit code 2 is reserved for malformed arguments, like --port abc.)"
+        },
+        {
+          "type": "do",
+          "id": "do",
+          "instructions": "Run the failing invocation yourself and inspect the exit code, then run a valid one (Ctrl+C to stop it):\n\n```python -m simulator.simulator --port 70000\necho $LASTEXITCODE   # PowerShell\npython -m simulator.simulator --port 9777\n```",
+          "command": "python -m simulator.simulator --port 70000"
+        },
+        {
+          "type": "verify",
+          "id": "verify",
+          "validator": "python_probe",
+          "mandatory": true,
+          "description": "Runs the invalid-port invocation in a subprocess and checks both the exit code and the stderr message.",
+          "args": {
+            "snippet": "import subprocess, sys\nr = subprocess.run([sys.executable, '-m', 'simulator.simulator', '--port', '70000'], capture_output=True, text=True)\nprint('exit:', r.returncode)\nprint('stderr:', r.stderr.strip())",
+            "expect_stdout_regex": "exit: 1\\nstderr: --port must be between 1 and 65535",
+            "timeout_seconds": 15,
+            "success_note": "Exit code 1 with a clear stderr message — validation happened before any socket was opened."
+          }
+        },
+        {
+          "type": "explain",
+          "id": "explain",
+          "question": "How exactly does the integer returned by main() become the process exit code?",
+          "keywords": ["SystemExit"],
+          "sample_answer": "`raise SystemExit(main())` raises SystemExit with main()'s return value as its code; the interpreter converts that to the process exit status. Without it, a script that returns 5 from main() would still exit 0."
+        }
+      ],
+      "hints": [
+        { "level": 1, "text": "Look at the last line of the file and what it does with main()'s return value." },
+        { "level": 2, "text": "SystemExit carries a 'code': an int becomes the exit status, a string prints to stderr and exits 1." },
+        { "level": 3, "text": "Run `python -c \"from simulator.simulator import main; import sys; sys.argv=['x','--port','70000']; main()\"` and catch what is raised." }
+      ]
+    },
+    {
+      "id": "d1-argparse-logging",
+      "title": "argparse and logging: configuring the DUT",
+      "objective": "Read parse_args() and configure_logging() fluently, and produce your first piece of DUT log evidence.",
+      "estimated_minutes": 12,
+      "concepts": ["python-runtime", "logging"],
+      "prerequisites": ["d1-main-entrypoint"],
+      "source_files": ["simulator/simulator.py"],
+      "requirements": ["REQ-COM-001"],
+      "blocks": [
+        {
+          "type": "learn",
+          "id": "learn",
+          "text": "`parse_args()` declares the CLI: `--host` (str, default 127.0.0.1), `--port` (int, default 9000), `--log-file` (Path), `--verbose` (flag). argparse does type conversion and `--help` for free.\n\n`configure_logging()` builds one formatter (UTC timestamps) and attaches it to **two handlers**: a StreamHandler (console) always, a FileHandler when `--log-file` is given. Handlers are where log records go; the formatter is what they look like; the level is which records survive.",
+          "more": "`logging.basicConfig(level=..., handlers=..., force=True)` configures the root logger; `force=True` drops any handlers already attached — important in long-lived processes where double-configuration would duplicate every line. `formatter.converter = time.gmtime` makes timestamps UTC so DUT logs and pytest logs can be correlated across machines and time zones. Note the style: `LOGGER.info(\"dut_ready host=%s port=%s\", host, port)` defers string formatting to the logging framework (no f-string cost when the level is disabled) and keeps fields machine-greppable."
+        },
+        {
+          "type": "do",
+          "id": "do",
+          "instructions": "Start the DUT yourself with a log file, then talk to it from a second terminal:\n\n```python -m simulator.simulator --port 9778 --log-file evidence/logs/manual.log --verbose\n```\n\n```from testlab.client import LabClient\nwith LabClient('127.0.0.1', 9778) as c:\n    print(c.request({'command': 'status', 'sequence': 1}).payload)\n```\n\nStop the DUT (Ctrl+C), then open `evidence/logs/manual.log` and find the `dut_ready`, `request`, `response`, and `shutdown_requested` lines.",
+          "command": "python -m simulator.simulator --port 9778 --log-file evidence/logs/manual.log --verbose"
+        },
+        {
+          "type": "verify",
+          "id": "verify",
+          "validator": "behavior_probe",
+          "mandatory": true,
+          "description": "Launches the DUT exactly as the harness does (with a log file), performs a real status request, and then checks the DUT log for the readiness line.",
+          "args": {
+            "steps": [
+              { "send": { "command": "status", "sequence": 1 }, "expect": { "status": "ok", "state": "READY", "sequence": 1 }, "max_elapsed_ms": 1000 }
+            ],
+            "log_expect_regex": "dut_ready host=127\\.0\\.0\\.1 port=\\d+",
+            "success_note": "The DUT answered a live status request AND recorded dut_ready in its log — behavior and evidence agree."
+          }
+        },
+        {
+          "type": "quiz",
+          "id": "quiz",
+          "question": "You want DEBUG-level records from the DUT. What is the minimal change?",
+          "options": [
+            "Edit every LOGGER.info call to LOGGER.debug",
+            "Pass --verbose so configure_logging sets the level to DEBUG",
+            "Add a second FileHandler",
+            "Set the formatter to include %(levelname)s"
+          ],
+          "answer_index": 1,
+          "explanation": "The level gate is what filters DEBUG records. --verbose flips level from INFO to DEBUG; handlers and formatters are about destination and appearance, not filtering."
+        },
+        {
+          "type": "explain",
+          "id": "explain",
+          "question": "Why attach both a console handler and a file handler instead of choosing one?",
+          "keywords": ["handler", "console", "file", "evidence"],
+          "sample_answer": "They serve different consumers: the console stream is for the operator watching a live run, the file is durable evidence collected after the run. Same formatter, two destinations — handlers are independent outputs of the same log records."
+        }
+      ],
+      "hints": [
+        { "level": 1, "text": "Handlers decide WHERE records go, formatters decide HOW they look, the level decides WHICH survive." },
+        { "level": 2, "text": "Read configure_logging() in simulator/simulator.py — count the handlers it appends." },
+        { "level": 3, "text": "Run the DUT with and without --log-file and diff the behavior; then try --verbose and watch DEBUG appear." }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,206 @@
+{
+  "lessons": [
+    {
+      "id": "d4-connection-lifecycle",
+      "title": "LabClient connection state machine",
+      "objective": "Drive LabClient through its full lifecycle — constructed, connected, closed, context-managed — and prove each transition by observation.",
+      "estimated_minutes": 10,
+      "status": "available",
+      "concepts": ["networking", "python-runtime"],
+      "prerequisites": ["d3-malformed-input"],
+      "source_files": ["src/testlab/client.py", "tests/conftest.py"],
+      "requirements": ["REQ-REC-001"],
+      "blocks": [
+        {
+          "type": "learn",
+          "id": "learn",
+          "text": "`LabClient` holds exactly two pieces of connection state: `self._socket` and `self._reader` (a buffered file object over the socket). Both start as `None` — constructing a client opens **nothing**.\n\n- `is_connected` is a property: true only when **both** are non-None.\n- `connect()` is idempotent: it returns immediately if already connected.\n- `close()` nulls both, even if closing one raises (the `finally` blocks).\n- `__enter__` calls `connect()` and returns self; `__exit__` calls `close()`.\n\nState lives in the pair, never in a flag — a boolean could lie; `None` cannot.",
+          "more": "The reader exists because TCP is a byte stream, not messages: `connection.makefile(\"r\", encoding=\"utf-8\", newline=\"\\n\")` gives `readline()`, which blocks until a full newline-terminated JSON line arrives. The try/finally structure in `close()` matters on real benches: if `_reader.close()` raises (e.g. the socket is already dead), `_socket` must still be nulled, or `is_connected` stays true against a corpse. Idempotent `connect()` lets `wait_until_ready()` call it on every poll iteration without leaking sockets. This is the same shape an instrument driver uses: construction is cheap and safe, acquisition is explicit, release is total."
+        },
+        {
+          "type": "predict",
+          "id": "predict",
+          "question": "`c = LabClient('127.0.0.1', port)` succeeds, then `print(c.is_connected)`. What prints — assuming no DUT is even running on that port?",
+          "options": [
+            "True — the constructor probes the port",
+            "False — nothing has connected yet",
+            "LabCommunicationError is raised by the constructor",
+            "It hangs until the DUT appears"
+          ],
+          "answer_index": 1,
+          "reveal": "The constructor only validates arguments and stores them. No socket is created until connect(), so is_connected is False even with no DUT anywhere. Construction being side-effect free is what makes the object cheap to build in fixtures and tests."
+        },
+        {
+          "type": "do",
+          "id": "do",
+          "instructions": "Start the DUT in one terminal:\n\n```python -m simulator.simulator --port 9781\n```\n\nIn a second terminal, open a REPL (activate `.venv`) and drive every transition:\n\n```from testlab.client import LabClient\nc = LabClient('127.0.0.1', 9781)\nc.is_connected          # False — constructed only\nc.connect()\nc.is_connected          # True\nc.connect()             # idempotent: no error, no new socket\nc.request({'command': 'status', 'sequence': 1}).payload\nc.close()\nc.is_connected          # False again\nwith LabClient('127.0.0.1', 9781) as c2:\n    print(c2.is_connected)   # True inside the with-block\nprint(c2.is_connected)       # False after it\n```\n\nStop the DUT with Ctrl+C when done.",
+          "command": "python -m simulator.simulator --port 9781"
+        },
+        {
+          "type": "verify",
+          "id": "verify",
+          "validator": "python_probe",
+          "mandatory": true,
+          "description": "Launches the DUT as a subprocess (the same Popen pattern the test fixture uses), waits for readiness, then prints is_connected across construct/connect/close. Any missing or misordered transition breaks the expected output.",
+          "args": {
+            "snippet": "import socket, subprocess, sys\nfrom testlab.client import LabClient\nwith socket.socket() as s:\n    s.bind(('127.0.0.1', 0))\n    port = s.getsockname()[1]\nproc = subprocess.Popen([sys.executable, '-m', 'simulator.simulator', '--host', '127.0.0.1', '--port', str(port)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\ntry:\n    ready = LabClient('127.0.0.1', port)\n    ready.wait_until_ready(deadline_seconds=5.0)\n    ready.close()\n    c = LabClient('127.0.0.1', port)\n    print(c.is_connected)\n    c.connect()\n    print(c.is_connected)\n    c.close()\n    print(c.is_connected)\nfinally:\n    proc.terminate()\n    proc.wait(timeout=5)",
+            "expect_stdout_regex": "False\\nTrue\\nFalse",
+            "timeout_seconds": 15,
+            "success_note": "The full state machine checks out: False after construction, True after connect(), False after close() — and the DUT subprocess was terminated on the way out."
+          }
+        },
+        {
+          "type": "explain",
+          "id": "explain",
+          "question": "Why does LabClient track state as a _socket/_reader pair instead of a simple `self.connected = True` flag?",
+          "keywords": ["flag", "state", "lie", "None", "socket"],
+          "sample_answer": "A boolean flag is a second source of truth that can disagree with reality — an exception could leave the flag True while the socket is dead. Deriving is_connected from whether _socket and _reader are non-None means the state can never lie: null the resources and the property reports closed automatically."
+        }
+      ],
+      "hints": [
+        { "level": 1, "text": "Ask what 'connected' physically means for this object: which attributes exist only after connect() succeeds?" },
+        { "level": 2, "text": "Read __init__, connect, close, and is_connected in src/testlab/client.py — the property is two lines and says everything." },
+        { "level": 3, "text": "In the REPL, inspect c.__dict__ before connect() and after close(): {'_socket': None, '_reader': None} in both cases. Then call connect() twice and check c._socket is the same object both times." }
+      ]
+    },
+    {
+      "id": "d4-timeouts-monotonic",
+      "title": "Two timeouts and a monotonic clock",
+      "objective": "Distinguish connect_timeout from response_timeout, and explain why all elapsed-time and deadline math in this repo uses time.monotonic().",
+      "estimated_minutes": 10,
+      "status": "available",
+      "concepts": ["timing", "networking"],
+      "prerequisites": ["d4-connection-lifecycle"],
+      "source_files": ["src/testlab/client.py", "tests/conftest.py"],
+      "requirements": ["REQ-COM-002"],
+      "blocks": [
+        {
+          "type": "learn",
+          "id": "learn",
+          "text": "LabClient has **two** timeouts guarding different operations:\n\n- `connect_timeout` — passed to `socket.create_connection`; bounds only the TCP handshake.\n- `response_timeout` — `connection.settimeout(...)` after connecting; bounds every subsequent `sendall`/`readline`.\n\nFor measuring duration, the client uses `time.monotonic()`, never `time.time()`. The monotonic clock cannot jump backwards: NTP corrections, daylight-saving changes, and manual clock sets do not affect it. A deadline computed as `time.monotonic() + seconds` is safe; the same arithmetic on wall time is not.\n\nOne subtlety: a dead port does not always refuse. A normal stack answers SYN with RST (instant `ConnectionRefusedError`); a filtering firewall can swallow it, and then `connect_timeout` is what saves you. Either way the handshake is bounded and the error is translated.",
+          "more": "`wait_until_ready()` shows the canonical deadline loop: `deadline = time.monotonic() + deadline_seconds`, then `while time.monotonic() < deadline:` — compute the deadline once, compare against the clock each iteration. REQ-COM-002's 250 ms acceptance criterion is measured the same way: `started = time.monotonic()` before send, `elapsed = time.monotonic() - started` after the response, stored on `LabResponse.elapsed_seconds`. Why not wall time: a backward NTP step in the middle of a measurement can make elapsed time negative or stretch a 0.2 s poll into minutes. A timeout that can fire early, late, or never is worse than none — flight-test timing evidence must be defensible, so the clock that cannot lie is the only acceptable one. On the refusal-versus-filter point: you cannot distinguish them from the exception type alone (`ConnectionRefusedError` vs `TimeoutError` as `__cause__`), but you do not need to — the client's contract is that connect() never hangs and never leaks a raw OSError, and both paths honor it."
+        },
+        {
+          "type": "predict",
+          "id": "predict",
+          "question": "You call `LabClient('127.0.0.1', 1, connect_timeout=0.3).connect()` against port 1, where nothing listens. What is **guaranteed**, on any machine?",
+          "options": [
+            "connect_timeout fires after 0.3 s and raises TimeoutError directly to the caller",
+            "LabCommunicationError wrapping an OSError (ConnectionRefusedError or TimeoutError), within 0.3 s",
+            "response_timeout fires after 0.5 s because no response arrives",
+            "The call hangs until the OS default TCP timeout, ~20+ seconds"
+          ],
+          "answer_index": 1,
+          "reveal": "On a normal TCP stack the OS answers SYN with RST within microseconds and you get ConnectionRefusedError almost instantly — a refusal waits for nothing, so no timeout is involved. But a filtering firewall can swallow the RST, and then connect_timeout fires instead. Either way the guarantee is the same: connect() bounds the handshake at 0.3 s and translates the OSError into LabCommunicationError. response_timeout never applies — no connection existed yet."
+        },
+        {
+          "type": "do",
+          "id": "do",
+          "instructions": "Prove both claims from the learn block in a REPL (no DUT needed for the first part):\n\n```import time\nfrom testlab.client import LabClient, LabCommunicationError\nc = LabClient('127.0.0.1', 1, connect_timeout=0.3)\nt0 = time.monotonic()\ntry:\n    c.connect()\nexcept LabCommunicationError as e:\n    print(type(e).__name__, type(e.__cause__).__name__)\nprint('elapsed:', round(time.monotonic() - t0, 2))\n```\n\nRead your own output: `ConnectionRefusedError` in milliseconds means a classic RST refusal; `TimeoutError` after ~0.3 s means something on your machine filtered the refusal and connect_timeout did the bounding. Either way the call returned inside 0.3 s, translated.\n\nThen start the DUT (`python -m simulator.simulator --port 9782`) and observe which clock the timing evidence uses:\n\n```with LabClient('127.0.0.1', 9782) as c2:\n    r = c2.request({'command': 'status', 'sequence': 1})\nprint(r.elapsed_seconds)   # measured with time.monotonic inside request()\n```",
+          "command": ".venv\\Scripts\\python"
+        },
+        {
+          "type": "verify",
+          "id": "verify",
+          "validator": "python_probe",
+          "mandatory": true,
+          "description": "Connects to loopback port 1 (nothing listens) and prints the raised exception, its __cause__, and the elapsed time. Passes on either failure shape — instant ConnectionRefusedError or connect_timeout-bounded TimeoutError — as long as the handshake is translated and bounded well under 2 s.",
+          "args": {
+            "snippet": "import socket, time\nfrom testlab.client import LabClient, LabCommunicationError\n# Reserve a port and never listen on it: connecting to a bound-but-unlistening\n# socket is refused. Assuming a well-known port such as 1 is free would make\n# this lesson unpassable on a machine where something happens to hold it.\nreserved = socket.socket()\nreserved.bind(('127.0.0.1', 0))\ndead_port = reserved.getsockname()[1]\nc = LabClient('127.0.0.1', dead_port, connect_timeout=0.3)\nt0 = time.monotonic()\ntry:\n    c.connect()\nexcept LabCommunicationError as e:\n    print(type(e).__name__)\n    print(type(e.__cause__).__name__)\nprint('elapsed:', round(time.monotonic() - t0, 1))\nreserved.close()",
+            "expect_stdout_regex": "LabCommunicationError\\n(ConnectionRefusedError|TimeoutError)\\nelapsed: 0\\.",
+            "timeout_seconds": 10,
+            "success_note": "The dead port failed fast and translated: LabCommunicationError wrapping an OSError, back in well under a second — bounded by connect_timeout, never by response_timeout."
+          }
+        },
+        {
+          "type": "quiz",
+          "id": "quiz",
+          "question": "During a 5-second wait_until_ready() poll, the OS steps the wall clock backwards by 2 minutes (NTP correction). What happens to the deadline?",
+          "options": [
+            "The loop exits 2 minutes late because it compares against time.time()",
+            "Nothing — the deadline is time.monotonic()-based and immune to wall-clock steps",
+            "The loop raises TimeoutError immediately",
+            "The poll interval doubles to compensate"
+          ],
+          "answer_index": 1,
+          "explanation": "time.monotonic() never moves backwards and is unaffected by NTP or manual clock changes, so the deadline computed from it still expires after exactly 5.0 real seconds. The same loop written on time.time() would have just run for two extra minutes."
+        },
+        {
+          "type": "explain",
+          "id": "explain",
+          "question": "Why does this codebase forbid time.time() for elapsed-time and deadline arithmetic, even though it would usually give the right answer?",
+          "keywords": ["monotonic", "NTP", "wall clock", "backwards", "jump"],
+          "sample_answer": "time.time() is the wall clock: NTP corrections, DST, and manual adjustments can move it backwards or forwards mid-measurement, making elapsed times negative or stretching deadlines. time.monotonic() only moves forward at a steady rate, so durations and deadlines computed from it are always correct — and timing evidence (like the 250 ms REQ-COM-002 criterion) stays defensible."
+        }
+      ],
+      "hints": [
+        { "level": 1, "text": "Separate two questions: who bounds the handshake, and who bounds each request/response after that? Then ask which clock can be trusted to subtract." },
+        { "level": 2, "text": "In src/testlab/client.py, find where _connect_timeout is used (connect) versus _response_timeout (settimeout), and count the time.monotonic() call sites." },
+        { "level": 3, "text": "Probe the dead port yourself: time LabClient('127.0.0.1', 1, connect_timeout=0.3).connect() with time.monotonic() and inspect e.__cause__ — ConnectionRefusedError means refused, TimeoutError means filtered. For the deadline pattern, read wait_until_ready(): deadline = monotonic() + seconds, loop while monotonic() < deadline." }
+      ]
+    },
+    {
+      "id": "d4-diagnose-comm-failure",
+      "title": "Diagnosing a dead DUT from the client side",
+      "objective": "Read LabClient's error translation, reproduce each failure mode against a live DUT, and classify the exact LabCommunicationError each produces.",
+      "estimated_minutes": 12,
+      "status": "available",
+      "concepts": ["failure-diagnosis", "networking", "python-runtime"],
+      "prerequisites": ["d4-timeouts-monotonic"],
+      "source_files": ["src/testlab/client.py"],
+      "requirements": ["REQ-REC-001"],
+      "blocks": [
+        {
+          "type": "learn",
+          "id": "learn",
+          "text": "Every communication failure surfaces as one exception type: `LabCommunicationError`. `request()` alone has four distinct paths to it:\n\n- **Not connected** — the guard at the top raises `\"Client is not connected\"` before any I/O.\n- **Send/receive error** — `sendall` or `readline` raising (TimeoutError/OSError) is translated: `\"Request failed: ...\"` with the original exception as `__cause__`.\n- **Closed connection** — an empty `readline()` means the peer sent FIN: `\"DUT closed the connection\"`.\n- **Invalid JSON** — a line that doesn't parse: `\"DUT returned invalid JSON: ...\"`.\n\nFour root causes, one exception type, four distinguishable messages.",
+          "more": "This is error translation, and it is the client's half of the protocol contract: callers (tests, fixtures, wait_until_ready) catch exactly one exception type and never import socket to do it. The original exception is preserved via `raise ... from exc`, so `__cause__` keeps the ConnectionResetError or TimeoutError for diagnosis — the message tells the operator what happened, the cause chain tells the debugger why. Note the empty-readline case is special: TCP delivers a graceful peer close as EOF, *not* as an exception, so a client that only caught OSError would silently parse an empty string as a response. Checking `if not line:` is what turns a silent protocol violation into a loud, labeled failure."
+        },
+        {
+          "type": "predict",
+          "id": "predict",
+          "question": "A client is connected to a healthy DUT. The DUT process is then killed, and the client calls request() again. Which failure path fires first?",
+          "options": [
+            "\"Client is not connected\" — the guard detects the dead peer",
+            "\"Request failed\" or \"DUT closed the connection\" — the error appears at send/receive time, not before",
+            "BrokenPipeError propagates uncaught to the caller",
+            "response_timeout fires with socket.timeout, always"
+          ],
+          "answer_index": 1,
+          "reveal": "is_connected only checks that the local objects are non-None — it cannot see a dead peer. The guard passes, and the failure shows up at I/O time: sendall may raise (translated to \"Request failed\") or readline may return '' (\"DUT closed the connection\"). Local state and peer state are different things; only the network tells the truth."
+        },
+        {
+          "type": "do",
+          "id": "do",
+          "instructions": "Reproduce all three connected-client failure modes against the real DUT.\n\nTerminal 1 — start the DUT:\n\n```python -m simulator.simulator --port 9783\n```\n\nTerminal 2 — REPL:\n\n```from testlab.client import LabClient, LabCommunicationError\nc = LabClient('127.0.0.1', 9783)\ntry:\n    c.request({'command': 'status', 'sequence': 1})\nexcept LabCommunicationError as e:\n    print(e)          # Client is not connected — the guard\nc.connect()\n```\n\nNow kill the DUT with Ctrl+C in terminal 1, then back in the REPL:\n\n```try:\n    c.request({'command': 'status', 'sequence': 2})\nexcept LabCommunicationError as e:\n    print(e)                          # which one did YOU get?\n    print(type(e.__cause__).__name__) # may be None — why?\n```\n\nNote the exact message: depending on timing you'll see \"Request failed\" (send or receive raised, with a `__cause__`) or \"DUT closed the connection\" (graceful EOF, no `__cause__`). Both are the same dead DUT — the OS, not your code, picks the path.",
+          "command": "python -m simulator.simulator --port 9783"
+        },
+        {
+          "type": "verify",
+          "id": "verify",
+          "validator": "python_probe",
+          "mandatory": true,
+          "description": "Launches the DUT as a subprocess, connects, terminates the DUT mid-session, then attempts one more request and prints the LabCommunicationError message. Accepts either translation of the dead peer: an I/O failure (\"Request failed\") or a graceful close (\"DUT closed the connection\").",
+          "args": {
+            "snippet": "import socket, subprocess, sys, time\nfrom testlab.client import LabClient, LabCommunicationError\nwith socket.socket() as s:\n    s.bind(('127.0.0.1', 0))\n    port = s.getsockname()[1]\nproc = subprocess.Popen([sys.executable, '-m', 'simulator.simulator', '--host', '127.0.0.1', '--port', str(port)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\ntry:\n    c = LabClient('127.0.0.1', port)\n    c.wait_until_ready(deadline_seconds=5.0)\n    proc.terminate()\n    proc.wait(timeout=5)\n    time.sleep(0.3)\n    try:\n        c.request({'command': 'status', 'sequence': 1})\n    except LabCommunicationError as e:\n        print(str(e))\n    c.close()\nfinally:\n    if proc.poll() is None:\n        proc.kill()\n        proc.wait(timeout=5)",
+            "expect_stdout_regex": "Request failed|closed the connection",
+            "timeout_seconds": 15,
+            "success_note": "The dead DUT surfaced as a translated LabCommunicationError — whether via an I/O exception or an empty readline, the failure was loud, typed, and labeled."
+          }
+        },
+        {
+          "type": "explain",
+          "id": "explain",
+          "question": "Why does LabClient wrap OSError in LabCommunicationError instead of letting the raw exception propagate to the caller?",
+          "keywords": ["translate", "contract", "abstraction"],
+          "sample_answer": "Wrapping translates implementation-specific errors (ConnectionResetError, BrokenPipeError, socket.timeout) into one exception type that is part of the client's contract. Callers catch LabCommunicationError without importing socket or knowing which OS-level error each platform raises, so the transport stays an abstraction — the implementation can change without breaking every call site."
+        }
+      ],
+      "hints": [
+        { "level": 1, "text": "is_connected describes local Python objects, not the peer. What is the first moment the client can actually learn the DUT is gone?" },
+        { "level": 2, "text": "Read request() in src/testlab/client.py top to bottom: the guard, the try/except around sendall/readline, the `if not line:` check, and the json.loads except. Each is one failure path." },
+        { "level": 3, "text": "Kill timing decides the path: if the FIN arrives before you send, sendall raises (Request failed, __cause__ set); if your send lands in the OS buffer first, readline returns '' (DUT closed the connection, __cause__ None). A short sleep after killing the DUT nudges you onto the EOF path." }
+      ]
+    }
+  ]
+}

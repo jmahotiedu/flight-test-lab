@@ -1,0 +1,249 @@
+{
+  "questions": [
+    {
+      "id": "iq-name-main",
+      "question": "What does `if __name__ == \"__main__\":` accomplish, and why does it matter in a test harness?",
+      "concepts": ["python-runtime"],
+      "keywords": ["import", "__main__"],
+      "sample_answer": "It separates import from execution: code under the guard runs only when the file is executed directly, not when it is imported. That lets tests import build_response() without starting a TCP server as an import side effect."
+    },
+    {
+      "id": "iq-monotonic",
+      "question": "Why use time.monotonic() instead of time.time() for measuring elapsed durations?",
+      "concepts": ["timing"],
+      "keywords": ["clock", "monotonic"],
+      "sample_answer": "monotonic() never moves backwards — it is unaffected by NTP corrections or manual clock changes, so a deadline or latency measurement cannot be corrupted by wall-clock adjustments mid-measurement."
+    },
+    {
+      "id": "iq-isolation",
+      "question": "Why might a test pass when run alone but fail inside the full suite?",
+      "concepts": ["pytest", "failure-diagnosis"],
+      "keywords": ["shared", "state"],
+      "sample_answer": "Shared state: a session-scoped fixture, a leaked process holding a port, ordering dependencies, or one test mutating global state another test reads. Alone, the state is pristine; in the suite it is contaminated."
+    },
+    {
+      "id": "iq-bounded-wait",
+      "question": "Why is a bounded wait (poll-until-ready with a deadline) preferable to sleep(5)?",
+      "concepts": ["timing", "process-management"],
+      "keywords": ["poll", "deadline"],
+      "sample_answer": "sleep(5) is slow when the service is ready in 50 ms and still fails when it needs 6 s. Polling with a deadline proceeds as soon as readiness is observable and fails with a clear timeout instead of a wrong assumption."
+    },
+    {
+      "id": "iq-terminate-kill",
+      "question": "What is the difference between terminate() and kill() on a subprocess, why try them in that order — and what changes on Windows?",
+      "concepts": ["process-management"],
+      "keywords": ["SIGTERM", "SIGKILL", "TerminateProcess", "Windows", "cleanup"],
+      "sample_answer": "On POSIX, terminate() sends SIGTERM — the process can run signal handlers, flush logs and exit cleanly — and kill() sends SIGKILL, which is immediate and uncatchable. You terminate first for graceful shutdown evidence, then kill only as a backstop, then wait() to reap. On Windows there are no signals: both call TerminateProcess, so there is genuinely no difference in effect. The ladder is still worth writing — the same harness has to shut a DUT down cleanly on Linux — but on Windows it is portable habit, not platform behaviour, and expecting a graceful shutdown there will disappoint you."
+    },
+    {
+      "id": "iq-fixture",
+      "question": "What is a pytest fixture and how does dependency injection work with it?",
+      "concepts": ["pytest"],
+      "keywords": ["fixture", "inject"],
+      "sample_answer": "A fixture is a function pytest calls to provide a test's declared parameters. Naming a fixture in a test's signature requests it; pytest resolves the dependency graph (fixtures can request other fixtures), caches by scope, and runs teardown after the test."
+    },
+    {
+      "id": "iq-ci-logs",
+      "question": "Why preserve logs and JUnit artifacts when a CI test fails?",
+      "concepts": ["ci-cd", "requirements-evidence"],
+      "keywords": ["evidence", "reproduce", "diagnos"],
+      "sample_answer": "The runner and its state vanish after the job. Without the DUT log and the JUnit report, a failure that only happens in CI is undiagnosable — the artifacts are the only evidence that survives."
+    },
+    {
+      "id": "iq-dut-vs-harness",
+      "question": "How would you distinguish a DUT defect from a test-harness defect?",
+      "concepts": ["failure-diagnosis"],
+      "keywords": ["log", "reproduce", "independent"],
+      "sample_answer": "Reproduce the behavior outside the harness (drive the DUT manually with a client and read its log). If the DUT misbehaves under a minimal independent driver, it is a DUT defect. If the DUT behaves correctly but the test still fails, suspect the harness: fixtures, timing assumptions, cleanup."
+    },
+    {
+      "id": "iq-sim-vs-hwil",
+      "question": "Why can a test pass against a simulator but fail against real hardware (HWIL)?",
+      "concepts": ["hwil-reasoning"],
+      "keywords": ["timing", "fidelity", "hardware"],
+      "sample_answer": "The simulator shares your clock, your OS, and idealized I/O. Real hardware adds real latency, jitter, electrical faults, partial failures, and state that survives resets. Any implicit assumption the simulator never violates — instant responses, perfect framing — becomes a potential failure on hardware."
+    },
+    {
+      "id": "iq-manifest",
+      "question": "What information belongs in a reproducibility manifest for a test run?",
+      "concepts": ["requirements-evidence"],
+      "keywords": ["version", "environment", "config"],
+      "sample_answer": "Code version (commit), the exact test selection and parameters, DUT configuration and fault settings, dependency versions, OS/platform, timestamps, and where the evidence was written. Enough for someone to rerun the identical experiment and compare results."
+    },
+    {
+      "id": "iq-sequence-id",
+      "question": "Why does a command/response protocol include a sequence ID?",
+      "concepts": ["protocol-design"],
+      "keywords": ["match", "correlat", "order"],
+      "sample_answer": "It correlates responses with requests. Without it, on a stream where responses can be delayed, dropped, or reordered, a client cannot prove which request a response answers — critical when checking for lost or duplicated messages."
+    },
+    {
+      "id": "iq-framing",
+      "question": "TCP is a byte stream. How does this lab's protocol find message boundaries, and what breaks if the framing is violated?",
+      "concepts": ["networking", "protocol-design"],
+      "keywords": ["newline", "framing", "stream"],
+      "sample_answer": "Newline-delimited JSON: readline() reads until '\\n'. If a sender omits the newline the receiver blocks forever; if a message contains a raw newline it is split and parsed as two malformed messages."
+    },
+    {
+      "id": "iq-timeout-values",
+      "question": "How do you choose a timeout value for a test — and what is wrong with making it very large?",
+      "concepts": ["timing", "failure-diagnosis"],
+      "keywords": ["deadline", "slow", "hang"],
+      "sample_answer": "Base it on the requirement (e.g. 250 ms response) plus measured margin for scheduling noise. An oversized timeout turns a hang regression into a slow suite that eventually passes — hiding the defect and destroying feedback time."
+    },
+    {
+      "id": "iq-race",
+      "question": "What is a race condition, and why do threaded tests need extra care to stay deterministic?",
+      "concepts": ["concurrency"],
+      "keywords": ["interleav", "shared", "order"],
+      "sample_answer": "A race is when the outcome depends on the interleaving of concurrent operations on shared state. Tests must control that interleaving — barriers, joins, locks — or assert only order-independent properties, otherwise they flake."
+    },
+    {
+      "id": "iq-context-manager",
+      "question": "Why do clients and servers in this lab implement context managers (with blocks)?",
+      "concepts": ["python-runtime", "networking"],
+      "keywords": ["cleanup", "__exit__", "exception"],
+      "sample_answer": "__exit__ runs even when the body raises, so sockets and servers are closed on every path. Without it, an exception mid-test leaks the connection and can hold the port for the next test."
+    },
+    {
+      "id": "iq-exit-codes",
+      "question": "How does a CI pipeline decide pass/fail, and why does that make exit codes a contract?",
+      "concepts": ["ci-cd", "python-runtime"],
+      "keywords": ["exit", "nonzero", "zero"],
+      "sample_answer": "Runners treat a zero exit status as success and anything else as failure. Every tool in the chain — pytest, ruff, mypy, your scripts — must return truthful exit codes, because the pipeline cannot see anything else."
+    },
+    {
+      "id": "iq-junit",
+      "question": "What is a JUnit XML report and what role does it play in requirements traceability?",
+      "concepts": ["requirements-evidence"],
+      "keywords": ["report", "testcase", "result"],
+      "sample_answer": "A machine-readable per-testcase result file (name, status, duration, failure detail). It is the evidence a traceability matrix points at: requirement → test → execution result, provable without rerunning."
+    },
+    {
+      "id": "iq-fault-classification",
+      "question": "A test fails in the lab. Name the four failure classes you must distinguish between.",
+      "concepts": ["failure-diagnosis"],
+      "keywords": ["product", "test", "infrastructure", "configuration"],
+      "sample_answer": "Product failure (the DUT is genuinely wrong), test failure (the test asserts something incorrect), infrastructure failure (harness, ports, processes, fixtures), and configuration failure (wrong parameters, wrong environment). Each has a different fix and a different owner."
+    },
+    {
+      "id": "iq-logging-levels",
+      "question": "Why does the DUT log requests at INFO and offer --verbose for DEBUG, instead of logging everything always?",
+      "concepts": ["logging"],
+      "keywords": ["signal", "noise", "level"],
+      "sample_answer": "Log volume is a signal-to-noise decision. Routine traffic at INFO keeps the evidence readable; DEBUG detail is opt-in for diagnosis so normal runs stay reviewable and failure runs can add detail on demand."
+    },
+    {
+      "id": "iq-yield-fixture",
+      "question": "Why does the DUT fixture use yield instead of returning the process handle?",
+      "concepts": ["pytest", "process-management"],
+      "keywords": ["teardown", "cleanup", "finally"],
+      "sample_answer": "Code after yield is teardown: pytest runs it after the test (or session) even when the test fails. That guarantees terminate/kill runs on every path — a return-based fixture has no cleanup hook."
+    },
+    {
+      "id": "iq-hang",
+      "question": "A DUT stops responding mid-test but its process is alive. Give three distinct hypotheses and the first check for each.",
+      "concepts": ["failure-diagnosis", "debugging"],
+      "keywords": ["hypothes", "check"],
+      "sample_answer": "Deadlock or blocked handler thread (check: does a second client get a response?); framing error — client waiting for a newline the server never sent (check: send raw bytes and watch the log); server busy-looping (check: CPU usage and log growth). Each has a different next experiment."
+    },
+    {
+      "id": "iq-port-zero",
+      "question": "Why does the harness bind port 0 to reserve a port, and what residual risk remains?",
+      "concepts": ["networking", "process-management"],
+      "keywords": ["ephemeral", "OS", "race"],
+      "sample_answer": "Port 0 asks the OS for a free ephemeral port instead of hardcoding one that may collide. The residual risk is a race: between releasing the reservation and the DUT binding it, another process could take it — the readiness poll is what makes the failure visible and bounded."
+    },
+    {
+      "id": "iq-parametrize",
+      "question": "What does @pytest.mark.parametrize buy you over a loop inside one test?",
+      "concepts": ["pytest"],
+      "keywords": ["separate", "case", "report"],
+      "sample_answer": "Each parameter set becomes a distinct test case with its own name, result, and failure output in the JUnit report. A loop hides failures after the first and reports one opaque test; parametrization reports exactly which inputs fail."
+    },
+    {
+      "id": "iq-marker",
+      "question": "What is the @pytest.mark.requirement marker doing in this repository, beyond decoration?",
+      "concepts": ["requirements-evidence", "pytest"],
+      "keywords": ["traceab", "requirement", "link"],
+      "sample_answer": "It records which requirement each test verifies, making the requirement→test link machine-readable. Combined with the traceability CSV and the JUnit report, it is the chain that lets you prove coverage of REQ-COM-001 without reading the code."
+    },
+    {
+      "id": "iq-raii",
+      "question": "In C++ terms, what is RAII and what Python mechanism plays the same role in this lab?",
+      "concepts": ["cpp-integration", "python-runtime"],
+      "keywords": ["destructor", "scope", "resource"],
+      "sample_answer": "RAII ties resource release to object lifetime: destructors free sockets/files when scope exits, even on exceptions. Python's equivalent here is the context manager — LabClient.__exit__ and the server's with-block close resources deterministically."
+    },
+    {
+      "id": "iq-core-dump",
+      "question": "What is a core dump and why is it more useful than a crash message alone?",
+      "concepts": ["debugging"],
+      "keywords": ["memory", "state", "postmortem"],
+      "sample_answer": "A snapshot of the process's memory at crash time. It enables postmortem debugging: backtraces, thread state, and variable values after the process is gone, instead of a single line saying it died."
+    },
+    {
+      "id": "iq-bench-locking",
+      "question": "Why do shared lab benches (real HWIL rigs) need resource locking, and what is the software analogue in this lab?",
+      "concepts": ["hwil-reasoning", "concurrency"],
+      "keywords": ["exclusive", "shared", "conflict"],
+      "sample_answer": "Two sessions driving one rig corrupt each other's stimulus and telemetry. Locking grants exclusive ownership with a clear owner and timeout. The lab's analogue is the ephemeral-port reservation plus session-scoped DUT ownership — one harness owns the DUT for its run."
+    },
+    {
+      "id": "iq-utf8",
+      "question": "Why does the protocol decode with errors=\"replace\" instead of letting decode() raise?",
+      "concepts": ["protocol-design", "networking"],
+      "keywords": ["robust", "survive", "invalid"],
+      "sample_answer": "A server must survive hostile or broken input. Letting UnicodeDecodeError escape would kill the handler thread and drop the connection; replacing bad bytes converts a transport-level defect into a parseable (and then INVALID_JSON) application-level error."
+    },
+    {
+      "id": "iq-daemon-threads",
+      "question": "What does daemon_threads=True do on the server, and what failure does it prevent?",
+      "concepts": ["concurrency", "process-management"],
+      "keywords": ["exit", "hang", "shutdown"],
+      "sample_answer": "Daemon threads do not keep the process alive: when the main thread exits, handler threads are abandoned instead of blocking shutdown. Without it, one stuck client handler could prevent the DUT from ever terminating."
+    },
+    {
+      "id": "iq-flaky",
+      "question": "A test fails 1 run in 20. Is it a product defect or a test defect, and how do you find out?",
+      "concepts": ["failure-diagnosis", "timing"],
+      "keywords": ["reproduc", "margin", "timing"],
+      "sample_answer": "Unknown until measured — that is the point of the question. Run it in a loop with evidence capture, then check whether failures cluster on timing margins (a 250 ms assertion on a loaded machine) or on genuine wrong responses. Timing-margin failures are usually test design; wrong payloads are product defects."
+    },
+    {
+      "id": "iq-link-error",
+      "question": "Code that compiles cleanly fails at link time with 'undefined reference'. What does that tell you about the error, and where do you look?",
+      "concepts": ["cpp-integration"],
+      "keywords": ["declar", "defin", "link", "librar", "symbol"],
+      "sample_answer": "Compilation only checks that a name was declared; linking checks that a definition actually exists. So the declaration in the header is fine and something is missing at the final step — a source file not added to the target, or a library not linked. In this lab that is `target_link_libraries(dut_core PUBLIC ws2_32)`: drop it and every Winsock call compiles and then fails to link."
+    },
+    {
+      "id": "iq-configure-vs-build",
+      "question": "What is the difference between `cmake -S cpp -B cpp/build` and `cmake --build cpp/build`, and why is deleting the build directory a safe first move when a build misbehaves?",
+      "concepts": ["cpp-integration", "ci-cd"],
+      "keywords": ["configure", "generat", "cache", "derived", "rebuild"],
+      "sample_answer": "The first configures: it reads CMakeLists.txt, finds a compiler and writes build files plus CMakeCache.txt. The second runs that generated build system. Everything under the build directory is derived from source, so deleting it can only cost a rebuild — and it clears a stale cache that may still describe a previous branch or compiler."
+    },
+    {
+      "id": "iq-debug-symbols",
+      "question": "The same crash produces a clear backtrace in one build and bare addresses in another. What differs, and what do you do about it for software you have to support in the field?",
+      "concepts": ["debugging", "cpp-integration"],
+      "keywords": ["symbol", "-g", "optimis", "optimiz", "inlin", "relwithdebinfo"],
+      "sample_answer": "Debug information: a `-g` build carries the mapping from addresses to files, lines and variable names, while an optimised build without it has none, and inlining removes frames the source implies. For shipped software the usual answer is RelWithDebInfo plus archived symbol files, so a crash from a customer machine can still be resolved months later."
+    },
+    {
+      "id": "iq-deadlock-diagnosis",
+      "question": "A server process is alive and still accepting connections, but one request never gets a reply. How do you establish whether it is slow or deadlocked?",
+      "concepts": ["debugging", "concurrency", "failure-diagnosis"],
+      "keywords": ["thread", "stack", "backtrace", "block", "mutex", "attach"],
+      "sample_answer": "Take a stack sample of the live process instead of guessing — `gdb -p <pid> -batch -ex \"thread apply all bt\"` in C++, faulthandler or py-spy in Python. A deadlocked thread sits in a blocking call such as a mutex lock; a slow one is doing work or sleeping with a deadline. Raising the client timeout only distinguishes them by accident, and destroys the evidence if the next run passes."
+    },
+    {
+      "id": "iq-parity-testing",
+      "question": "You have a simulated DUT and a native one. What makes a test suite able to run against either, and which results still should not be trusted equally?",
+      "concepts": ["cpp-integration", "hwil-reasoning", "pytest"],
+      "keywords": ["interface", "protocol", "implement", "timing", "hardware"],
+      "sample_answer": "Tests must assert on externally observable protocol behaviour — connect, send, check the response — rather than importing the implementation, so the only implementation-specific code is the argv that starts the process. Logic and protocol results then transfer between implementations; timing results do not, because the simulator's margins say nothing about the real device's scheduling or I/O."
+    }
+  ]
+}

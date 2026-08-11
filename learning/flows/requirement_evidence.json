@@ -1,0 +1,45 @@
+{
+  "title": "Requirement → evidence chain",
+  "stages": [
+    {
+      "name": "requirement",
+      "what": "A row in requirements/software_requirements.csv: ID, title, shall-statement, verification method, acceptance criteria.",
+      "why": "The requirement is the contract. Tests exist to prove it, not the other way around.",
+      "source": "requirements/software_requirements.csv",
+      "concepts": "requirements, acceptance criteria",
+      "failures": "A vague 'shall respond quickly' is untestable — 250 ms is."
+    },
+    {
+      "name": "test",
+      "what": "A pytest function marked @pytest.mark.requirement(\"REQ-...\") asserting the acceptance criteria.",
+      "why": "The marker makes the requirement→test link machine-readable, not tribal knowledge.",
+      "source": "tests/test_status.py, tests/test_protocol.py",
+      "concepts": "pytest markers, traceability",
+      "failures": "--strict-markers rejects unregistered markers; a typo'd requirement ID silently breaks the chain."
+    },
+    {
+      "name": "execution",
+      "what": "pytest runs the test against a live DUT child process launched by the session fixture.",
+      "why": "Results only mean something against a running system with controlled startup and cleanup.",
+      "source": "tests/conftest.py",
+      "concepts": "fixtures, process lifecycle",
+      "failures": "A leaked DUT from an earlier run can make this run's results meaningless."
+    },
+    {
+      "name": "result",
+      "what": "Pass/fail per testcase, written as JUnit XML to evidence/junit/test-results.xml.",
+      "why": "JUnit is the machine-readable result format CI systems and audits consume.",
+      "source": "evidence/junit/test-results.xml",
+      "concepts": "JUnit, exit codes",
+      "failures": "No junitxml flag = no machine-readable result, only console text."
+    },
+    {
+      "name": "evidence",
+      "what": "JUnit XML plus the DUT log (evidence/logs/dut.log), cross-referenced from requirements/traceability.csv.",
+      "why": "The traceability row is the auditable sentence: 'REQ-X is verified by test T, evidence at path E.'",
+      "source": "requirements/traceability.csv, evidence/logs/dut.log",
+      "concepts": "traceability, evidence, audit",
+      "failures": "Evidence is gitignored and regenerated — if you need it for an audit, collect it before the next run overwrites it."
+    }
+  ]
+}

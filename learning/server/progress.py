@@ -1,0 +1,597 @@
+"""Learner progress persistence.
+
+State lives in ``learning/.progress.json`` (gitignored).  Writes are atomic
+(temp file + ``os.replace``) and a corrupt file is backed up and reset rather
+than crashing the server.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import json
+import os
+import shutil
+import threading
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+from learning.server.curriculum import Curriculum, Lesson
+
+STATE_VERSION = 1
+
+# A mastered question stays in the pool for occasional review rather than
+# disappearing, so interview mode never runs out of material.
+MIN_INTERVIEW_WEIGHT = 0.05
+
+# Upper bound for any persisted counter.  "Is an int" is not "is a number this
+# code can use": a 4000-digit `incorrect` raises OverflowError the first time
+# interview_weights() converts it to float, and a large negative `streak`
+# overflows in the exponentiation — either one stops Interview mode responding
+# instead of taking the documented backup-and-reset path.  A million of
+# anything is already far beyond a real course.
+MAX_COUNTER = 1_000_000
+
+
+def _now() -> str:
+    return datetime.now(UTC).isoformat(timespec="seconds")
+
+
+def _empty_state() -> dict[str, Any]:
+    return {
+        "version": STATE_VERSION,
+        "last_lesson_id": None,
+        "lessons": {},
+        "concepts": {},
+        "interview": {},
+    }
+
+
+def _record_is_valid(section: str, record: dict[str, Any]) -> bool:
+    """Check the fields a section's records must hold, and their types.
+
+    Missing keys are tolerated (they are filled from the template on use);
+    wrong *types* are not, because those surface much later as an exception
+    inside a request handler instead of the documented back-up-and-reset.
+    """
+    integer_fields: tuple[str, ...]
+    list_fields: tuple[str, ...] = ()
+    if section == "lessons":
+        integer_fields = (
+            "attempts",
+            "hints_used",
+            "quiz_attempts",
+            "interview_baseline",
+        )
+        list_fields = ("steps_done", "quiz_correct", "explain_done")
+    elif section == "concepts":
+        integer_fields = ("correct", "incorrect")
+    elif section == "interview":
+        # streak is read with int() when weighting questions, so a non-integer
+        # here raises ValueError on the first /api/interview instead of taking
+        # the documented reset path.
+        integer_fields = ("correct", "incorrect", "streak")
+    else:
+        return True
+
+    for field in integer_fields:
+        value = record.get(field)
+        if value is None:
+            continue
+        if isinstance(value, bool) or not isinstance(value, int):
+            return False
+        # Range, not just type. These are counts, so a negative one is
+        # nonsense and an enormous one is unusable arithmetic.
+        if not 0 <= value <= MAX_COUNTER:
+            return False
+    for field in list_fields:
+        value = record.get(field)
+        if value is not None and (
+            not isinstance(value, list)
+            or not all(isinstance(item, str) for item in value)
+        ):
+            return False
+    if section == "lessons":
+        status = record.get("status")
+        if status is not None and not isinstance(status, str):
+            return False
+        validations = record.get("validations")
+        if validations is not None:
+            if not isinstance(validations, dict):
+                return False
+            for outcome in validations.values():
+                # "passed" is the field a mandatory gate is read from, and it
+                # is read for truth. {"passed": "false"} is a non-empty string,
+                # so a damaged file would certify the lesson instead of taking
+                # the documented backup-and-reset path.
+                if not isinstance(outcome, dict):
+                    return False
+                verdict = outcome.get("passed")
+                if verdict is not None and not isinstance(verdict, bool):
+                    return False
+                at = outcome.get("at")
+                if at is not None and not isinstance(at, str):
+                    return False
+    return True
+
+
+class ProgressStore:
+    """Thread-safe, atomic learner-progress store."""
+
+    def __init__(self, path: Path) -> None:
+        self._path = path
+        self._lock = threading.Lock()
+        self._state = self._load()
+
+    def _backup_locked(self) -> None:
+        backup = self._path.with_suffix(".corrupt.json")
+        with contextlib.suppress(OSError):
+            shutil.copy2(self._path, backup)
+
+    def _load(self) -> dict[str, Any]:
+        if not self._path.exists():
+            return _empty_state()
+        try:
+            data = json.loads(self._path.read_text(encoding="utf-8"))
+        # Every way json.loads can fail. JSONDecodeError and UnicodeDecodeError
+        # are ValueError subclasses, as is the oversized-integer error CPython
+        # raises past its digit limit; deep nesting raises RecursionError,
+        # which is not. Any of them escaping here means `python -m learning`
+        # cannot start at all, and the documented backup-and-reset never runs.
+        except (OSError, ValueError, RecursionError):
+            self._backup_locked()
+            return _empty_state()
+        if not isinstance(data, dict) or data.get("version") != STATE_VERSION:
+            self._backup_locked()
+            return _empty_state()
+        # Valid JSON is not the same as a valid state file.  Something like
+        # {"version": 1, "lessons": []} parses fine and then fails much later
+        # with an AttributeError deep in a request handler; check the shape of
+        # every section here so a damaged file takes the documented
+        # back-up-and-reset path instead of breaking the dashboard.
+        for key, default in _empty_state().items():
+            value = data.setdefault(key, default)
+            if key in ("version", "last_lesson_id"):
+                continue
+            if not isinstance(value, dict) or not all(
+                isinstance(k, str) and isinstance(v, dict) for k, v in value.items()
+            ):
+                self._backup_locked()
+                return _empty_state()
+            # The record *fields* have to be checked too, not just that each
+            # record is a dict: {"concepts": {"x": {"correct": "bad"}}} is
+            # shaped correctly and still raises the first time /api/state
+            # converts that value to int, which is a crash rather than the
+            # documented reset.
+            if not all(_record_is_valid(key, record) for record in value.values()):
+                self._backup_locked()
+                return _empty_state()
+        last_lesson = data.get("last_lesson_id")
+        if last_lesson is not None and not isinstance(last_lesson, str):
+            self._backup_locked()
+            return _empty_state()
+        return data
+
+    def _save_locked(self) -> None:
+        # The temp name carries the pid: a fixed ".tmp" is shared by every
+        # process pointed at this file, so two writers can interleave badly
+        # enough that one replace() finds the file already consumed by the
+        # other. single_instance() makes that unlikely; this makes it
+        # impossible, and costs one string.
+        temp = self._path.with_suffix(f".{os.getpid()}.tmp")
+        temp.write_text(
+            json.dumps(self._state, indent=2, sort_keys=True), encoding="utf-8"
+        )
+        temp.replace(self._path)
+
+    def snapshot(self) -> dict[str, Any]:
+        with self._lock:
+            result: dict[str, Any] = json.loads(json.dumps(self._state))
+            return result
+
+    @staticmethod
+    def _empty_lesson_record() -> dict[str, Any]:
+        return {
+            "status": "not_started",
+            "steps_done": [],
+            "validations": {},
+            "quiz_correct": [],
+            "quiz_attempts": 0,
+            "explain_done": [],
+            "attempts": 0,
+            "hints_used": 0,
+            "interview_baseline": 0,
+            "started_at": None,
+            "completed_at": None,
+        }
+
+    def _lesson_record_locked(self, lesson_id: str) -> dict[str, Any]:
+        lessons: dict[str, dict[str, Any]] = self._state["lessons"]
+        record = lessons.setdefault(lesson_id, self._empty_lesson_record())
+        # Fill any absent keys from the template. The loader tolerates missing
+        # fields (they are optional in a persisted file), so a record like {}
+        # would otherwise reach mark_started and raise KeyError on
+        # "started_at" — a crash instead of the documented recovery.
+        for key, default in self._empty_lesson_record().items():
+            record.setdefault(key, default)
+        return record
+
+    def _interview_total_locked(self) -> int:
+        total = 0
+        for entry in self._state["interview"].values():
+            if not isinstance(entry, dict):
+                continue
+            for key in ("correct", "incorrect"):
+                value = entry.get(key, 0)
+                if isinstance(value, int) and not isinstance(value, bool):
+                    total += value
+        return total
+
+    def mark_started(self, lesson_id: str) -> None:
+        with self._lock:
+            record = self._lesson_record_locked(lesson_id)
+            if record["started_at"] is None:
+                record["started_at"] = _now()
+                # A lifetime total cannot show that a drill happened *here*:
+                # Interview mode is open from day one, so a learner who used
+                # it earlier would satisfy Day 14's "answer five questions"
+                # before opening the lesson. Snapshot the count on first
+                # entry and measure from there.
+                record["interview_baseline"] = self._interview_total_locked()
+            if record["status"] == "not_started":
+                record["status"] = "in_progress"
+            record["attempts"] += 1
+            self._state["last_lesson_id"] = lesson_id
+            self._save_locked()
+
+    def record_step(self, lesson_id: str, block_id: str) -> None:
+        with self._lock:
+            record = self._lesson_record_locked(lesson_id)
+            if block_id not in record["steps_done"]:
+                record["steps_done"].append(block_id)
+            self._state["last_lesson_id"] = lesson_id
+            self._save_locked()
+
+    def record_validation(
+        self,
+        lesson_id: str,
+        block_id: str,
+        passed: bool,
+        *,
+        mandatory: bool = True,
+        concepts: tuple[str, ...] = (),
+        historical: bool = False,
+    ) -> None:
+        with self._lock:
+            record = self._lesson_record_locked(lesson_id)
+            previous = record["validations"].get(block_id, {})
+            # A red-stage check records something that happened, not something
+            # that stays true: Day 2's "the ping test must fail first" stops
+            # reproducing the moment the learner implements ping — which is the
+            # lesson succeeding. Overwriting the observation would revoke the
+            # completion it earned, and the only way back would be to un-write
+            # working code. So the pass stands once it has been seen.
+            if historical and previous.get("passed") is True:
+                # Concepts are left alone too: a re-run of a check that has
+                # already served its purpose is evidence of nothing either way.
+                self._state["last_lesson_id"] = lesson_id
+                self._save_locked()
+                return
+            record["validations"][block_id] = {"passed": passed, "at": _now()}
+            # A mandatory validator's outcome is evidence about a concept,
+            # exactly as a quiz answer is. Non-mandatory ones are excluded:
+            # some are demonstrations that are *supposed* to go red (Day 14's
+            # symptom probe), and counting those as misses would penalise the
+            # learner for following the instructions.
+            if concepts and mandatory:
+                self._bump_concepts_locked(concepts, passed)
+            # Only a *mandatory* check can un-complete a lesson. Some lessons
+            # ship a demonstration check that is meant to go red (Day 14's
+            # symptom probe); re-running one of those after finishing the
+            # lesson must not revoke the certification, or the roadmap would
+            # contradict lesson_completion().
+            if not passed and mandatory and record.get("status") == "complete":
+                # Re-running a check that now fails un-completes the lesson.
+                # lesson_completion() already reports the missing gate, but the
+                # roadmap, /api/state and prerequisite unlocking read the
+                # stored status — so leaving it "complete" would keep
+                # certifying work that has since regressed.
+                record["status"] = "in_progress"
+                record["completed_at"] = None
+            self._state["last_lesson_id"] = lesson_id
+            self._save_locked()
+
+    def record_quiz(
+        self, lesson_id: str, block_id: str, correct: bool, concepts: tuple[str, ...]
+    ) -> None:
+        with self._lock:
+            record = self._lesson_record_locked(lesson_id)
+            record["quiz_attempts"] += 1
+            if correct and block_id not in record["quiz_correct"]:
+                record["quiz_correct"].append(block_id)
+            self._bump_concepts_locked(concepts, correct)
+            self._state["last_lesson_id"] = lesson_id
+            self._save_locked()
+
+    def record_explain(
+        self, lesson_id: str, block_id: str, passed: bool, concepts: tuple[str, ...]
+    ) -> None:
+        with self._lock:
+            record = self._lesson_record_locked(lesson_id)
+            if passed and block_id not in record["explain_done"]:
+                record["explain_done"].append(block_id)
+            self._bump_concepts_locked(concepts, passed)
+            self._state["last_lesson_id"] = lesson_id
+            self._save_locked()
+
+    def record_hint(self, lesson_id: str, index: int) -> int:
+        """Reveal hint ``index``; return how many hints are now revealed.
+
+        Counting requests rather than hints made this non-idempotent: a
+        double-click, or two open tabs, spent two hints to reveal one — and
+        the extra count silently skipped a hint the learner never saw.  Hints
+        revealed is the high-water mark of the indices asked for, so asking
+        again for one already revealed changes nothing.
+        """
+        with self._lock:
+            record = self._lesson_record_locked(lesson_id)
+            revealed = max(int(record["hints_used"]), index + 1)
+            if revealed != record["hints_used"]:
+                record["hints_used"] = revealed
+                self._save_locked()
+            return revealed
+
+    def record_interview(
+        self, question_id: str, correct: bool, concepts: tuple[str, ...] = ()
+    ) -> None:
+        """Record an interview answer and credit its concepts.
+
+        The answer feeds concept mastery for the same reason a lesson quiz
+        does: interview mode advertises that it tracks weak areas, and it can
+        only do that if answering there moves the same numbers.
+        """
+        with self._lock:
+            entry = self._state["interview"].setdefault(
+                question_id, {"correct": 0, "incorrect": 0, "streak": 0}
+            )
+            entry["correct" if correct else "incorrect"] += 1
+            entry["streak"] = int(entry.get("streak", 0)) + 1 if correct else 0
+            if concepts:
+                self._bump_concepts_locked(concepts, correct)
+            self._save_locked()
+
+    def _bump_concepts_locked(self, concepts: tuple[str, ...], correct: bool) -> None:
+        for concept in concepts:
+            entry = self._state["concepts"].setdefault(
+                concept, {"correct": 0, "incorrect": 0, "last_seen": None}
+            )
+            entry["correct" if correct else "incorrect"] += 1
+            entry["last_seen"] = _now()
+
+    def _lesson_is_complete_locked(
+        self,
+        lesson_id: str,
+        curriculum: Curriculum | None,
+        seen: set[str],
+    ) -> bool:
+        """Is this lesson genuinely complete, all the way up the chain?
+
+        Two conditions, and both are load-bearing:
+
+        * The learner marked it complete.  Passing the last gate is not the
+          same act as finishing — a learner who runs the final check and then
+          closes the tab has not said "done", and treating that as complete
+          would unlock the next lesson while ``mark_complete`` still refuses
+          it as a prerequisite.
+        * Its gates still hold, recursively.  Completing A then B and then
+          breaking A's mandatory check must not leave C completable through a
+          B that is only nominally complete.
+
+        This is the single definition of "complete"; prerequisites, roadmap
+        locks, navigation and the counters all ask it, so they cannot drift
+        apart in either direction.
+        """
+        record = self._state["lessons"].get(lesson_id)
+        if record is None or record.get("status") != "complete":
+            return False
+        if curriculum is None or lesson_id in seen:
+            return True
+        lesson = curriculum.lessons.get(lesson_id)
+        if lesson is None:
+            return True
+        seen.add(lesson_id)
+        complete, _ = self._lesson_completion_locked(lesson, curriculum, seen)
+        return complete
+
+    def lesson_completion(
+        self, lesson: Lesson, curriculum: Curriculum | None = None
+    ) -> tuple[bool, list[str]]:
+        """Return (complete, list-of-missing-requirements) for a lesson."""
+        with self._lock:
+            return self._lesson_completion_locked(lesson, curriculum, set())
+
+    def _lesson_completion_locked(
+        self,
+        lesson: Lesson,
+        curriculum: Curriculum | None = None,
+        seen: set[str] | None = None,
+    ) -> tuple[bool, list[str]]:
+        """Gate evaluation, with the caller already holding the lock.
+
+        mark_complete needs to evaluate the gates and write the status without
+        releasing the lock in between: otherwise a concurrent /api/validate
+        recording a mandatory failure lands in the gap, sees status
+        "in_progress" so skips revocation, and completion then writes
+        "complete" over a currently-failing lesson.
+        """
+        if lesson.status == "unavailable":
+            return False, ["lesson is unavailable"]
+        record = self._state["lessons"].get(lesson.id)
+        if record is None:
+            missing = ["lesson not started"]
+            return False, missing
+        missing = []
+        # Prerequisites are part of the gate, not just a roadmap decoration.
+        # Without this a client can complete a locked lesson directly through
+        # the API, and because unlocking trusts stored statuses, that would
+        # cascade: a broken prerequisite chain unlocks everything downstream.
+        #
+        # When the curriculum is available the chain is evaluated against
+        # *current* gate outcomes rather than stored statuses, so a mandatory
+        # check that started failing invalidates everything downstream of it
+        # even if those lessons were completed earlier.
+        seen = set(seen or ())
+        seen.add(lesson.id)
+        for prerequisite in lesson.prerequisites:
+            if not self._lesson_is_complete_locked(prerequisite, curriculum, seen):
+                missing.append(f"prerequisite {prerequisite!r} is not complete")
+        validations = record["validations"]
+        for block in lesson.mandatory_validators():
+            outcome = validations.get(block["id"])
+            # `is True`, not truthiness: only a real boolean recorded by
+            # record_validation counts as a pass. The loader rejects anything
+            # else, and this is the second lock on the same door.
+            if not isinstance(outcome, dict) or outcome.get("passed") is not True:
+                missing.append(f"mandatory validation {block['id']!r} not passed")
+        for block_id in lesson.required_quiz_ids():
+            if block_id not in record["quiz_correct"]:
+                missing.append(f"quiz {block_id!r} not answered correctly")
+        for block_id in lesson.required_explain_ids():
+            if block_id not in record["explain_done"]:
+                missing.append(f"explain {block_id!r} not answered")
+        return (not missing, missing)
+
+    def mark_complete(
+        self, lesson: Lesson, curriculum: Curriculum | None = None
+    ) -> tuple[bool, list[str]]:
+        with self._lock:
+            complete, missing = self._lesson_completion_locked(lesson, curriculum)
+            if not complete:
+                return False, missing
+            record = self._lesson_record_locked(lesson.id)
+            record["status"] = "complete"
+            record["completed_at"] = _now()
+            self._save_locked()
+        return True, []
+
+    def completion_map(self, curriculum: Curriculum) -> dict[str, bool]:
+        """Which lessons are complete, by the same rule prerequisites use.
+
+        Navigation, roadmap locks and the progress counters all used to read
+        the *stored* status, which drifts from the gate in both directions:
+        a lesson whose prerequisite later broke stays stored "complete", and
+        a lesson whose gates all pass is not complete until the learner says
+        so.  Either drift shows the roadmap one thing and has
+        ``/api/complete`` insist on another.
+
+        One evaluation of one predicate, shared by every caller.  Reads
+        recorded outcomes only — no validator re-runs.
+        """
+        with self._lock:
+            return {
+                lesson_id: self._lesson_is_complete_locked(lesson_id, curriculum, set())
+                for lesson_id in curriculum.ordered_lesson_ids
+            }
+
+    def validation_passed(self, lesson_id: str, block_id: str) -> bool:
+        """Has this block's check already been recorded as passing?"""
+        with self._lock:
+            record = self._state["lessons"].get(lesson_id, {})
+            outcome = record.get("validations", {}).get(block_id, {})
+            return bool(isinstance(outcome, dict) and outcome.get("passed") is True)
+
+    def lesson_status(self, lesson: Lesson) -> str:
+        with self._lock:
+            record = self._state["lessons"].get(lesson.id)
+        if record is None:
+            return "not_started"
+        return str(record["status"])
+
+    def resume_lesson_id(self, curriculum: Curriculum) -> str:
+        """First available, incomplete lesson in program order.
+
+        Prerequisites are honored against the *current* gate outcome, not the
+        stored status, so the learner never lands on a lesson whose
+        prerequisite chain is broken — /api/validate would refuse to complete
+        it and name a prerequisite the roadmap shows as done.
+        """
+        complete = self.completion_map(curriculum)
+
+        def is_actionable(lesson_id: str) -> bool:
+            lesson = curriculum.lessons.get(lesson_id)
+            if lesson is None or lesson.status == "unavailable":
+                return False
+            if complete.get(lesson_id):
+                return False
+            return all(complete.get(prereq, False) for prereq in lesson.prerequisites)
+
+        # Where the learner actually was, when that is still somewhere they can
+        # work. Program order alone sends them to the earliest unfinished
+        # lesson, which is the wrong one whenever the roadmap has branches:
+        # finishing Day 10 unlocks Day 11 and the independent Day 13, so a
+        # learner who chose Day 13 and restarted landed back on Day 11.
+        with self._lock:
+            last = self._state.get("last_lesson_id")
+        if isinstance(last, str) and is_actionable(last):
+            return last
+
+        for lesson_id in curriculum.ordered_lesson_ids:
+            if is_actionable(lesson_id):
+                return lesson_id
+        # Everything available is complete: return the last lesson so the
+        # UI has somewhere sensible to land.
+        return curriculum.ordered_lesson_ids[-1]
+
+    def concept_mastery(self, concepts: tuple[str, ...]) -> dict[str, dict[str, Any]]:
+        with self._lock:
+            stored = self._state["concepts"]
+            mastery: dict[str, dict[str, Any]] = {}
+            for concept in concepts:
+                entry = stored.get(concept, {"correct": 0, "incorrect": 0})
+                correct = int(entry.get("correct", 0))
+                incorrect = int(entry.get("incorrect", 0))
+                total = correct + incorrect
+                mastery[concept] = {
+                    "correct": correct,
+                    "incorrect": incorrect,
+                    "score": (correct / total) if total else None,
+                    "weak": total > 0 and correct / total < 0.7,
+                }
+            return mastery
+
+    def interview_weights(
+        self, question_concepts: dict[str, tuple[str, ...]]
+    ) -> dict[str, float]:
+        """Weight each interview question by weakness of its concepts.
+
+        Unseen questions get a neutral weight, misses weigh much more so they
+        resurface, and each correct answer *decays* the weight so a question
+        you have repeatedly answered right stops crowding out ones you have
+        never seen.  The floor keeps mastered questions in the pool for
+        occasional review instead of removing them.
+        """
+        mastery = self.concept_mastery(
+            tuple({c for cs in question_concepts.values() for c in cs})
+        )
+        with self._lock:
+            interview_state = self._state["interview"]
+        weights: dict[str, float] = {}
+        for qid, concepts in question_concepts.items():
+            weight = 1.0
+            for concept in concepts:
+                entry = mastery.get(concept, {})
+                score = entry.get("score")
+                if score is None:
+                    weight += 0.5
+                else:
+                    weight += 1.0 - float(score)
+            history = interview_state.get(qid, {"correct": 0, "incorrect": 0})
+            weight += 2.0 * float(history.get("incorrect", 0))
+            # Decay on the *current streak*, not the lifetime total: a miss
+            # resets the streak, so a question answered right six times and
+            # then missed comes back immediately instead of staying buried
+            # under its own history — the opposite of what this mode is for.
+            streak = min(int(history.get("streak", 0)), 6)
+            weight *= 0.5**streak
+            weights[qid] = max(weight, MIN_INTERVIEW_WEIGHT)
+        return weights

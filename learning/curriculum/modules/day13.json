@@ -1,0 +1,228 @@
+{
+  "lessons": [
+    {
+      "id": "d13-test-architecture",
+      "title": "The test loop: controller, stimulus, DUT, telemetry, capture",
+      "objective": "Map every component of this repo onto the universal hardware test loop, and say precisely what is synthetic about it.",
+      "estimated_minutes": 10,
+      "concepts": ["hwil-reasoning"],
+      "prerequisites": ["d10-failing-check-evidence"],
+      "source_files": ["README.md", "simulator/simulator.py", "src/testlab/client.py", "tests/conftest.py"],
+      "flow": "hwil_loop",
+      "requirements": [],
+      "blocks": [
+        {
+          "type": "learn",
+          "id": "learn",
+          "text": "Every hardware test rig — from this lab to a Lockheed HWIL bench — is the same loop: a **test controller** sequences the run, a **stimulus** drives the **DUT** (device under test), the DUT emits **telemetry**, and a **capture** stage stores it for **evaluation** against requirements.\n\nHere: pytest is the controller, `LabClient` is the stimulus, `simulator/simulator.py` is the DUT, the JSON responses plus DUT log are telemetry, and `evidence/` (JUnit + logs) is capture.\n\nThis lab is **synthetic** — a TCP/JSON stand-in, not a real aircraft rig. The shape is what transfers.",
+          "more": "In a real HWIL facility the mapping is literal: the controller is a test executive (often Python-driven) running on a real-time host, the stimulus is signal injection over MIL-STD-1553/ARINC/analog lines, the DUT is flight hardware or a line-replaceable unit, telemetry is bus monitors and data recorders, and capture is a time-correlated evidence store tied to a requirements database. Two things this lab deliberately keeps from the real world: the controller never talks to the DUT except through the stimulus channel (tests use LabClient, never simulator internals at runtime), and evidence is written to a directory the code treats as append-only output, gitignored like any rig's data volume."
+        },
+        {
+          "type": "predict",
+          "id": "predict",
+          "question": "A test fails and you want to know what the DUT actually did. In this lab's mapping, which artifact is the telemetry?",
+          "options": [
+            "The pytest terminal output",
+            "The DUT log file plus the JSON responses LabClient received",
+            "The simulator source code",
+            "The requirements CSV"
+          ],
+          "answer_index": 1,
+          "reveal": "Telemetry is what the DUT emitted during the run: its log stream and the responses it sent. Pytest output is the controller's verdict; source and requirements are inputs, not observations."
+        },
+        {
+          "type": "do",
+          "id": "do",
+          "instructions": "Trace one full loop by hand. Run one test with evidence output:\n\n```pytest tests/test_status.py -q --junitxml evidence/junit/d13-loop.xml\n```\n\nThen open, in order: `tests/test_status.py` (controller), `src/testlab/client.py` (stimulus), `evidence/logs/dut.log` (telemetry from the DUT), and `evidence/junit/d13-loop.xml` (capture/evaluation). Write down which line in the JUnit file corresponds to which log lines.\n\nFinally, re-read `README.md` and confirm it names the same mapping you just traced. (bash: same pytest command works unchanged.)",
+          "command": "pytest tests/test_status.py -q --junitxml evidence/junit/d13-loop.xml"
+        },
+        {
+          "type": "verify",
+          "id": "verify",
+          "validator": "artifact_check",
+          "mandatory": true,
+          "description": "Confirms the README — the repo's own contract — names the DUT and the evidence directory, the two anchors of the loop mapping.",
+          "args": {
+            "file": "README.md",
+            "contains": ["DUT", "evidence"],
+            "success_note": "README names both the DUT and evidence/: the loop mapping you traced is the documented architecture, not an interpretation."
+          }
+        },
+        {
+          "type": "explain",
+          "id": "explain",
+          "question": "In your own words: what makes this lab synthetic, and which property of the loop survives unchanged on real hardware?",
+          "keywords": ["synthetic", "simulated", "loop", "shape", "controller", "telemetry"],
+          "sample_answer": "The DUT is a Python process speaking JSON over TCP, so physics, wiring, and real-time constraints are absent — that is the synthetic part. What survives is the loop's shape: a controller drives a stimulus through an interface, observes telemetry, and captures it as evidence evaluated against requirements. The discipline of keeping those roles separate transfers directly."
+        }
+      ],
+      "hints": [
+        { "level": 1, "text": "Ask of each repo component: does it DECIDE what runs, DRIVE the device, BE the device, REPORT what happened, or STORE the result?" },
+        { "level": 2, "text": "tests/conftest.py starts the DUT process; src/testlab/client.py is the only thing tests use to talk to it. Read both with the five roles in mind." },
+        { "level": 3, "text": "Mapping: pytest=controller, LabClient=stimulus, simulator/simulator.py=DUT, JSON responses + evidence/logs/dut.log=telemetry, evidence/ (JUnit XML + logs) = capture/evaluation against requirements/." }
+      ]
+    },
+    {
+      "id": "d13-resource-management",
+      "title": "Shared bench resources: exclusive ownership with a lock file",
+      "objective": "Implement a BenchLock that gives one test controller exclusive ownership of a shared bench resource, with owner and timestamp recorded.",
+      "estimated_minutes": 15,
+      "concepts": ["hwil-reasoning", "concurrency"],
+      "prerequisites": ["d13-test-architecture"],
+      "source_files": ["src/testlab/client.py", "src/testlab/__init__.py"],
+      "requirements": [],
+      "blocks": [
+        {
+          "type": "learn",
+          "id": "learn",
+          "text": "Real benches are **shared**: one rig, several controllers that want it. Two controllers driving the same DUT at once corrupts both runs — interleaved stimulus, unattributable telemetry.\n\nThe standard answer is **exclusive ownership** with a visible claim: a **lock file** whose contents say *who* owns the resource and *since when*. Acquire creates it (failing if it exists), release deletes it. The owner+timestamp pair turns 'the bench is busy' into 'alice has held it since 14:02' — that is diagnosable.\n\nSafe setup/teardown follows: teardown must release even on failure.",
+          "more": "A lock file is cooperative, not enforced: it only works if every controller checks it. That is also true on real benches, which is why facilities pair the file with procedure. The atomic primitive here is `os.open(path, os.O_CREAT | os.O_EXCL)` — creation fails if and only if the file already exists, so two racing acquirers cannot both win; a check-then-create pair would leave a race window. Stale locks (owner crashed without release) are the classic operational problem; recording owner and ISO timestamp is what lets an operator decide whether to break the lock. Note the contrast with the simulator you have been testing: it is a ThreadingTCPServer that happily accepts many clients at once — Day 9 proved that with five concurrent connections. Nothing in the DUT stops two controllers from driving it simultaneously, which is exactly why the ownership rule has to live outside it. That is true of real benches too: the instrument does not know who booked it."
+        },
+        {
+          "type": "predict",
+          "id": "predict",
+          "question": "Controller A holds the lock file. Controller B calls acquire(). What should happen, and why?",
+          "options": [
+            "B overwrites the file — newest controller wins",
+            "B's acquire() returns False and the file still names A",
+            "B blocks until A releases",
+            "B raises an exception and deletes A's lock"
+          ],
+          "answer_index": 1,
+          "reveal": "Non-blocking refusal: acquire() returns False, ownership is unchanged. The caller decides whether to retry, wait, or abort — the lock itself never blocks, and never silently steals a resource mid-run from another controller."
+        },
+        {
+          "type": "do",
+          "id": "do",
+          "instructions": "Create `src/testlab/bench.py` with a `BenchLock` class:\n\n- `BenchLock(path, owner)` — lock file location and the owner string.\n- `acquire()` — create the lock file atomically (fail if it exists), writing JSON with `owner` and an ISO-8601 `timestamp`; return `True` on success, `False` if the lock is already held.\n- `release()` — free the bench, but only if *this* instance is the one holding it. A controller whose `acquire()` failed must not be able to delete the owner's lock (teardown calls `release()` on every controller, including the ones that never got in).\n- `is_locked()` — `True` while the lock file exists.\n\nThen exercise it in a REPL from the repo root (activate `.venv` first): two BenchLock instances on the same path, and confirm the second cannot acquire until the first releases.\n\n```from testlab.bench import BenchLock\nimport tempfile, os\np = os.path.join(tempfile.mkdtemp(), 'bench.lock')\na, b = BenchLock(p, 'alice'), BenchLock(p, 'bob')\nprint(a.acquire(), b.acquire())   # True False\na.release(); print(b.acquire())   # True\n```\n\nHint 3 has the skeleton if you want the shape first.",
+          "command": ".venv\\Scripts\\python"
+        },
+        {
+          "type": "verify",
+          "id": "verify-shape",
+          "validator": "source_check",
+          "mandatory": true,
+          "description": "Parses acquire() and requires a real exclusive-create call — os.open with O_EXCL, open(path, 'x'), touch(exist_ok=False) or mkdir(). The AST is read, not the text: O_EXCL written in a comment is not the operation, and a sequential probe cannot tell an atomic create from a check-then-write because both look right when nothing else is running.",
+          "args": {
+            "file": "src/testlab/bench.py",
+            "must_contain": [
+              "class BenchLock",
+              "-> bool",
+              "-> None"
+            ],
+            "must_create_exclusively": "acquire",
+            "success_note": "src/testlab/bench.py defines an annotated BenchLock — the shape is in place, and it will survive `mypy src simulator learning`."
+          }
+        },
+        {
+          "type": "verify",
+          "id": "verify-behavior",
+          "validator": "python_probe",
+          "mandatory": true,
+          "description": "Drives BenchLock through the full ownership cycle in a fresh process — alice acquires, bob is refused, bob's teardown release() must NOT free alice's lock, then alice releases and bob can acquire.",
+          "args": {
+            "snippet": "import json, tempfile, os\nfrom datetime import datetime\nfrom testlab.bench import BenchLock\npath = os.path.join(tempfile.mkdtemp(), 'bench.lock')\na = BenchLock(path, 'alice')\nprint(a.acquire())\nb = BenchLock(path, 'bob')\nprint(b.acquire())\nb.release()\nprint(a.is_locked())\n# The lock file has to say who holds it and since when, or 'the bench is\n# busy' never becomes 'alice has held it since 14:02'.\nrecord = json.loads(open(path, encoding='utf-8').read())\nprint('owner:', record['owner'])\ndatetime.fromisoformat(record['timestamp'].replace('Z', '+00:00'))\nprint('timestamp: ok')\nprint(b.acquire())\na.release()\nprint(b.acquire())\nb.release()\nprint(a.is_locked())",
+            "expect_stdout_regex": "True\\nFalse\\nTrue\\nowner: alice\\ntimestamp: ok\\nFalse\\nTrue\\nFalse",
+            "timeout_seconds": 10,
+            "success_note": "Exclusive ownership holds even under teardown: bob's release() left alice's lock intact (a non-owner cannot free the bench), and bob only got in after alice released."
+          }
+        },
+        {
+          "type": "verify",
+          "id": "verify-race",
+          "validator": "python_probe",
+          "mandatory": true,
+          "description": "Forces the losing interleaving deterministically: bob holds the bench, then alice's existence check is answered “free” exactly once — the window a real race opens by accident. An exclusive create still refuses, because the kernel decides at creation time; a check-then-write overwrites bob's claim and the bench is now held by two controllers at once. No timing, no retries, no flakiness. Both ways of asking are covered: exists()/is_file() and the EAFP shape that reads the lock and catches FileNotFoundError — the same check-then-write with the check spelled as an exception.",
+          "args": {
+            "snippet": "import json, os, tempfile\nfrom pathlib import Path\nfrom testlab.bench import BenchLock\npath = os.path.join(tempfile.mkdtemp(), 'bench.lock')\nbob = BenchLock(path, 'bob')\nprint('bob_holds=%s' % bob.acquire())\n# A real race is a scheduling accident. This makes it reproducible: the next\n# question alice asks about the lock is answered 'it is not there' exactly\n# once, which is the interleaving where bob took the bench in the window\n# between alice looking and alice writing. An exclusive create still refuses,\n# because the kernel decides at creation time, not at check time.\n#\n# Both ways of looking are covered. Patching only exists()/is_file() left the\n# EAFP shape untouched: read the lock, catch FileNotFoundError, write it — a\n# check-then-write with the check spelled differently.\nreal = (Path.exists, Path.is_file, os.path.exists, os.path.isfile,\n        Path.read_text, Path.read_bytes, Path.open, os.stat)\nstate = {'lied': False}\ndef absent(fn, missing):\n    def wrapper(target, *a, **k):\n        if not state['lied'] and str(target) == path:\n            state['lied'] = True\n            if missing:\n                raise FileNotFoundError(2, 'No such file or directory', path)\n            return False\n        return fn(target, *a, **k)\n    return wrapper\nPath.exists, Path.is_file = absent(real[0], False), absent(real[1], False)\nos.path.exists, os.path.isfile = absent(real[2], False), absent(real[3], False)\nPath.read_text, Path.read_bytes = absent(real[4], True), absent(real[5], True)\nPath.open, os.stat = absent(real[6], True), absent(real[7], True)\ntry:\n    stolen = BenchLock(path, 'alice').acquire()\nfinally:\n    Path.exists, Path.is_file = real[0], real[1]\n    os.path.exists, os.path.isfile = real[2], real[3]\n    Path.read_text, Path.read_bytes = real[4], real[5]\n    Path.open, os.stat = real[6], real[7]\nprint('stolen=%s' % stolen)\nprint('owner=%s' % json.loads(open(path, encoding='utf-8').read())['owner'])",
+            "expect_stdout_regex": "bob_holds=True\nstolen=False\nowner=bob",
+            "timeout_seconds": 10,
+            "success_note": "acquire() refused even when told the bench was free: the exclusive create failed at the kernel, so bob's claim survived. A check-then-write would have printed stolen=True owner=alice — two controllers on one bench, which on a real bench is two test rigs driving the same hardware."
+          }
+        },
+        {
+          "type": "explain",
+          "id": "explain",
+          "question": "Why record owner and timestamp inside the lock file, rather than using the file's mere existence as the lock?",
+          "keywords": ["stale", "owner", "timestamp", "diagnos", "crash"],
+          "sample_answer": "Existence alone says 'busy' but not who or since when. When a controller crashes without releasing, the stale lock would block the bench forever; with owner and ISO timestamp an operator (or a reaper) can see who holds it and how old the claim is, and decide whether it is safe to break."
+        }
+      ],
+      "hints": [
+        { "level": 1, "text": "The hard part is making 'create only if absent' atomic — a plain exists() check followed by write() leaves a race window between two acquirers." },
+        { "level": 2, "text": "Use os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY) — it raises FileExistsError if the lock is already held. Write JSON: owner + datetime.now(timezone.utc).isoformat()." },
+        { "level": 3, "text": "Skeleton — note the annotations: `src/` is type-checked by strict mypy, so an untyped method here would fail the quality gate you ran on Day 10.\n\n```from __future__ import annotations\n\nimport json\nimport os\nfrom datetime import UTC, datetime\nfrom pathlib import Path\n\n\nclass BenchLock:\n    def __init__(self, path: str | Path, owner: str) -> None:\n        self.path = Path(path)\n        self.owner = owner\n        self._held = False   # did *this* instance win the lock?\n\n    def acquire(self) -> bool:   # atomic create; False on FileExistsError\n        ...\n\n    def release(self) -> None:   # release only what this instance holds\n        ...\n\n    def is_locked(self) -> bool: # self.path.exists()\n        ...\n```\nLock file contents: {\"owner\": self.owner, \"timestamp\": <ISO-8601 UTC>}." },
+        { "level": 4, "text": "acquire(): try `fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)`; except FileExistsError return False; else write json.dumps({'owner': self.owner, 'timestamp': datetime.now(UTC).isoformat()}), close, set `self._held = True`, return True.\n\nrelease() must refuse to unlink a lock this instance does not hold:\n\n```    def release(self) -> None:\n        if not self._held:\n            return\n        self.path.unlink(missing_ok=True)\n        self._held = False\n```\n\nWhy the guard matters: teardown normally calls release() in a `finally`, including on the controller whose acquire() returned False. An unconditional unlink there deletes the *owner's* lock and lets a third controller onto the bench while the first is still driving it — the exact collision the lock exists to prevent. Keep the return annotations from hint 3; `mypy src simulator learning` runs strict and rejects an untyped def." }
+      ]
+    },
+    {
+      "id": "d13-sim-vs-hwil-gap",
+      "title": "Why simulation passes while HWIL fails — and the run manifest",
+      "objective": "Name the assumptions a simulator never violates that hardware will, and capture run identity in a reproducibility manifest.",
+      "estimated_minutes": 12,
+      "concepts": ["hwil-reasoning", "requirements-evidence"],
+      "prerequisites": ["d13-resource-management"],
+      "source_files": ["simulator/simulator.py", "tests/conftest.py", "requirements/"],
+      "requirements": [],
+      "blocks": [
+        {
+          "type": "learn",
+          "id": "learn",
+          "text": "A test that passes in simulation can still fail on hardware, because the simulator shares your **clock, OS, and idealized I/O**: no real **latency** or **jitter**, no **partial failures** (a bus that drops one word in a thousand), no state that **survives reset** (stuck actuators, latched faults).\n\nThe defense is **configuration identity**: before trusting a result, pin down *exactly what ran*. A **run manifest** records the commit, interpreter, platform, test selection, and DUT configuration — so 'it passed' means a reproducible thing, not a vibe.",
+          "more": "This is why HWIL facilities treat every discrepancy as a configuration question first: which software load, which rig wiring, which calibration, which test executive version. The simulator in this repo is honest about its limits — it answers instantly and deterministically, never drops or reorders a message mid-stream, and a fresh process is a truly fresh DUT. On hardware each of those is a failure mode with its own test discipline: latency budgets measured with real clocks, fault injection for partial failures, power-cycle tests for surviving state. A manifest does not close those gaps; it makes them reportable — when a run disagrees with hardware, the manifest is the diff you start from."
+        },
+        {
+          "type": "predict",
+          "id": "predict",
+          "question": "Your suite passes against the simulator but fails intermittently on the real rig. Which gap is the LEAST likely suspect?",
+          "options": [
+            "Real latency and jitter the simulator never models",
+            "Partial failures — the rig drops occasional messages",
+            "State surviving reset on the hardware",
+            "The simulator running on a different Python minor version"
+          ],
+          "answer_index": 3,
+          "reveal": "Intermittent failure points at timing, partial failure, or surviving state — the classic sim-vs-HWIL gaps. A Python version difference is a real configuration concern (it belongs in the manifest) but it produces deterministic, reproducible differences, not intermittency."
+        },
+        {
+          "type": "do",
+          "id": "do",
+          "instructions": "Write a run manifest for a real test run. First gather the values:\n\n```git rev-parse HEAD\npython --version\npytest tests/test_status.py -q\n```\n\nThen create `evidence/exercises/manifest.json` (create the directory) with these keys, filled with the real values:\n\n- `commit` — output of `git rev-parse HEAD`\n- `python_version` — e.g. from `python --version`\n- `platform` — e.g. `windows`, from `sys.platform`\n- `pytest_selection` — what you ran, e.g. `\"tests/test_status.py\"`\n- `dut_config` — the DUT settings for the run: `host` and `port` are required (they name the listener the run talked to), plus anything else that mattered, e.g. the log file\n- `timestamp` — ISO-8601 UTC of the run\n\nOne-liner for the timestamp: `python -c \"from datetime import datetime, timezone; print(datetime.now(timezone.utc).isoformat())\"`\n\nHint 3 has the skeleton with empty values. (bash: same commands; use forward slashes in paths.)",
+          "command": "git rev-parse HEAD"
+        },
+        {
+          "type": "verify",
+          "id": "verify",
+          "validator": "artifact_check",
+          "mandatory": true,
+          "description": "Checks that all six configuration-identity fields are actually filled in — a real commit id, a parseable ISO-8601 timestamp, and a DUT configuration that names the host and port the run actually used. An empty skeleton does not pass, and neither does {\"host\": null} or a port left at the skeleton's 0 — both look filled in to an is-it-empty test and identify no listener.",
+          "args": {
+            "file": "evidence/exercises/manifest.json",
+            "json_fields": {
+              "commit": "commit",
+              "python_version": "^\\d+\\.\\d+",
+              "platform": "string",
+              "pytest_selection": "string",
+              "dut_config": { "object": { "host": "string", "port": "port" } },
+              "timestamp": "timestamp"
+            },
+            "success_note": "Manifest complete: a real commit, interpreter version, platform, selection, DUT config and timestamp — this run can actually be reproduced, not just described."
+          }
+        },
+        {
+          "type": "explain",
+          "id": "explain",
+          "question": "Name two assumptions this simulator never violates that real hardware will.",
+          "keywords": ["latency", "timing"],
+          "sample_answer": "Latency/timing: the simulator answers deterministically and effectively instantly — hardware has real latency and jitter that can break timing-sensitive sequences. And it never partially fails or keeps state across reset: real rigs drop occasional messages and can power back up with latched faults or stuck outputs."
+        }
+      ],
+      "hints": [
+        { "level": 1, "text": "Ask: what would I need to know, six months from now, to re-run this exact test and trust a comparison?" },
+        { "level": 2, "text": "The six keys come from three sources: git (commit), the interpreter (python_version, platform), and the run itself (pytest_selection, dut_config, timestamp)." },
+        { "level": 3, "text": "Skeleton to fill in at evidence/exercises/manifest.json — every value has to be replaced with a real one, because the check reads the values, not the key names:\n\n```{\n  \"commit\": \"\",\n  \"python_version\": \"\",\n  \"platform\": \"\",\n  \"pytest_selection\": \"\",\n  \"dut_config\": {\"host\": \"\", \"port\": 0, \"log_file\": \"\"},\n  \"timestamp\": \"\"\n}\n```\nGet commit from `git rev-parse HEAD`, platform from `python -c \"import sys; print(sys.platform)\"`. A manifest of empty strings is exactly the kind of evidence that looks complete in an audit and reproduces nothing." },
+        { "level": 4, "text": "Generate it programmatically instead of by hand:\n\n```python -c \"import json, subprocess, sys, pathlib; from datetime import datetime, timezone; m = {'commit': subprocess.check_output(['git','rev-parse','HEAD'], text=True).strip(), 'python_version': sys.version.split()[0], 'platform': sys.platform, 'pytest_selection': 'tests/test_status.py', 'dut_config': {'host': '127.0.0.1', 'port': 9000, 'log_file': 'evidence/logs/dut.log'}, 'timestamp': datetime.now(timezone.utc).isoformat()}; p = pathlib.Path('evidence/exercises'); p.mkdir(parents=True, exist_ok=True); (p/'manifest.json').write_text(json.dumps(m, indent=2))\"\n```" }
+      ]
+    }
+  ]
+}

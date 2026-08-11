@@ -13,9 +13,28 @@ venv/
 .idea/
 .DS_Store
 Thumbs.db
+# Generated evidence is never committed; only the .gitkeep placeholders that
+# preserve the directory structure are. Re-including a directory (!evidence/
+# logs/) is not enough on its own — without the following wildcard, git
+# descends into it and tracks every generated log.
 evidence/*
 !evidence/.gitkeep
 !evidence/logs/
+evidence/logs/*
 !evidence/logs/.gitkeep
 !evidence/junit/
+evidence/junit/*
 !evidence/junit/.gitkeep
+cpp/build/
+.serena/
+learning/.progress.json
+# The advisory lock the server holds while running. It is deliberately left on
+# disk — deleting it on exit would race a second instance that is mid-acquire —
+# and the kernel, not the file, is what releases the lock.
+learning/.progress.lock
+# Atomic-write scratch files carry the writing process's pid, so one interrupted
+# run leaves .progress.<pid>.tmp behind. The old fixed-name rule matched none of
+# them.
+learning/.progress.*.tmp
+learning/.corrupt.json
+learning/*.corrupt.json

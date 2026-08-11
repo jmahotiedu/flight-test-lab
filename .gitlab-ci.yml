@@ -12,13 +12,14 @@ default:
 stages:
   - quality
   - test
+  - native
 
 quality:
   stage: quality
   script:
-    - ruff check src simulator tests
-    - ruff format --check src simulator tests
-    - mypy src simulator
+    - ruff check src simulator tests learning
+    - ruff format --check src simulator tests learning
+    - mypy src simulator learning
 
 test:
   stage: test
@@ -26,8 +27,54 @@ test:
     - mkdir -p evidence/junit evidence/logs
     - pytest -v --junitxml=evidence/junit/test-results.xml --cov=testlab --cov=simulator --cov-report=xml:evidence/coverage.xml
   artifacts:
+    # Repeats when/expire_in/paths because a job-level artifacts block
+    # replaces the default rather than merging: without paths, evidence/ is
+    # dropped and evidence/logs/dut.log — REQ-REC-001's evidence — dies with
+    # the runner even though the reports survive.
+    when: always
+    expire_in: 30 days
+    paths:
+      - evidence/
     reports:
       junit: evidence/junit/test-results.xml
       coverage_report:
         coverage_format: cobertura
         path: evidence/coverage.xml
+
+# The C++ DUT and its CTest suite, then the protocol tests driven against it.
+# The base image has no compiler, so this job installs one; that is also why
+# it is a separate stage rather than more steps in `test`.
+native:
+  stage: native
+  before_script:
+    - apt-get update && apt-get install -y build-essential cmake gdb
+    - python -m pip install --upgrade pip
+    - python -m pip install -e ".[dev]"
+  script:
+    - mkdir -p evidence/junit evidence/logs
+    - cmake -S cpp -B cpp/build
+    - cmake --build cpp/build
+    # --output-junit puts the CTest evidence under evidence/, which is the
+    # path the traceability map declares for REQ-CPP-001.
+    - ctest --test-dir cpp/build -C Debug --output-on-failure --output-junit "$CI_PROJECT_DIR/evidence/junit/ctest-results.xml"
+    - pytest -v --dut cpp tests/test_status.py tests/test_protocol.py --junitxml=evidence/junit/test-results-cpp.xml
+    - pytest -v tests/test_cpp_dut.py --junitxml=evidence/junit/test-results-parity.xml
+    # The Day 11-12 lesson validators only run once cpp/build exists. In the
+    # `test` stage they skip themselves, so without this a broken mandatory
+    # native check would leave the whole pipeline green.
+    - pytest -v tests/learning/test_native_lessons.py --junitxml=evidence/junit/test-results-native-lessons.xml
+  artifacts:
+    # A job-level `artifacts:` replaces the default block wholesale rather
+    # than merging with it, so `paths:` has to be repeated here — without it
+    # evidence/ is not uploaded and ctest-results.xml, which traceability.csv
+    # names as REQ-CPP-001 evidence, disappears with the runner.
+    when: always
+    expire_in: 30 days
+    paths:
+      - evidence/
+    reports:
+      junit:
+        - evidence/junit/ctest-results.xml
+        - evidence/junit/test-results-cpp.xml
+        - evidence/junit/test-results-parity.xml
+        - evidence/junit/test-results-native-lessons.xml

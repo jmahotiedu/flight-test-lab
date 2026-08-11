@@ -5,3 +5,16 @@ REQ-PROTO-001,tests/test_protocol.py::test_unknown_command_is_rejected_without_s
 REQ-PROTO-001,tests/test_protocol.py::test_missing_command_is_rejected,evidence/junit/test-results.xml
 REQ-PROTO-002,tests/test_protocol.py::test_malformed_json_is_rejected_without_stopping_dut,evidence/junit/test-results.xml
 REQ-REC-001,tests/test_cleanup.py::test_dut_process_is_running_during_session,evidence/logs/dut.log
+REQ-FAULT-001,tests/test_faults.py::test_delayed_response_fault_engages_and_logs,evidence/logs/dut-fault-delayed.log
+REQ-FAULT-001,tests/test_faults.py::test_dropped_connection_fault_closes_without_response,evidence/logs/dut-fault-dropped.log
+REQ-FAULT-001,tests/test_faults.py::test_malformed_response_fault_sends_unparseable_bytes,evidence/logs/dut-fault-malformed.log
+REQ-FAULT-001,tests/test_faults.py::test_fault_config_file_drives_injection,evidence/logs/dut-fault-config.log
+REQ-FAULT-001,tests/test_faults.py::test_startup_delay_fault_delays_readiness,evidence/logs/dut-fault-startup.log
+REQ-FAULT-001,tests/test_faults.py::test_process_termination_fault_exits_after_the_configured_requests,evidence/logs/dut-fault-termination.log
+REQ-CPP-001,tests/test_cpp_dut.py::test_cpp_dut_is_byte_identical_to_python,evidence/junit/test-results-parity.xml
+REQ-CPP-001,tests/test_cpp_dut.py::test_cpp_dut_matches_python_on_raw_bytes,evidence/junit/test-results-parity.xml
+REQ-CPP-001,tests/test_cpp_dut.py::test_course_added_commands_do_not_diverge,evidence/junit/test-results-parity.xml
+REQ-CPP-001,tests/test_cpp_dut.py::test_cpp_dut_answers_status_within_deadline,evidence/junit/test-results-parity.xml
+REQ-CPP-001,tests/test_cpp_dut.py::test_cpp_dut_survives_malformed_input,evidence/junit/test-results-parity.xml
+REQ-CPP-001,tests/test_cpp_dut.py::test_cpp_dut_writes_the_same_evidence_lines,evidence/junit/test-results-parity.xml
+REQ-CPP-001,cpp/tests/test_protocol.cpp::protocol.*,evidence/junit/ctest-results.xml

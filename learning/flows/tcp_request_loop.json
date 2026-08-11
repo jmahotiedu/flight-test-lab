@@ -1,0 +1,53 @@
+{
+  "title": "Client ↔ DUT request loop",
+  "stages": [
+    {
+      "name": "client",
+      "what": "LabClient builds a request dict and serializes it with `json.dumps(..., sort_keys=True) + \"\\n\"`.",
+      "why": "One canonical serialization means client and server agree on the wire format byte for byte.",
+      "source": "src/testlab/client.py::LabClient.request",
+      "concepts": "JSON, protocol design",
+      "failures": "Forgetting the trailing newline leaves the server blocked in readline() forever."
+    },
+    {
+      "name": "TCP socket",
+      "what": "Bytes travel over a loopback TCP connection: ordered, reliable, but with NO message boundaries.",
+      "why": "TCP is a stream — the protocol's newline framing is what reconstructs messages.",
+      "source": "(OS kernel loopback interface)",
+      "concepts": "TCP, streams, framing",
+      "failures": "A write may arrive in several packets; readline() reassembles. Confusing 'one send = one read' is the classic stream bug."
+    },
+    {
+      "name": "request handler",
+      "what": "DutRequestHandler.handle() reads a line from rfile, decodes UTF-8 (errors='replace'), and JSON-parses it.",
+      "why": "Defensive decoding turns hostile or broken bytes into a parseable application error instead of a dead handler thread.",
+      "source": "simulator/simulator.py::DutRequestHandler.handle",
+      "concepts": "encoding, readline, defensive parsing",
+      "failures": "json.JSONDecodeError is caught and becomes INVALID_JSON; anything uncaught would kill the handler thread and drop the client."
+    },
+    {
+      "name": "build_response",
+      "what": "The pure function maps the request dict to a response dict: type check, command presence, known commands, error codes.",
+      "why": "Pure logic is unit-testable without sockets and gives every failure a structured error_code.",
+      "source": "simulator/simulator.py::build_response",
+      "concepts": "validation, error codes, sequence IDs",
+      "failures": "Missing sequence echo breaks request/response correlation for the client."
+    },
+    {
+      "name": "socket",
+      "what": "The response is serialized the same way and written to wfile with a trailing newline, then flushed.",
+      "why": "flush() guarantees the bytes leave the process now — buffering would look like a slow DUT.",
+      "source": "simulator/simulator.py::DutRequestHandler.handle",
+      "concepts": "buffering, flush",
+      "failures": "A missing flush can delay responses past the client's response_timeout under load."
+    },
+    {
+      "name": "client",
+      "what": "LabClient reads one line from its buffered reader, JSON-decodes it, checks it is an object, and measures elapsed time with time.monotonic().",
+      "why": "Monotonic timing makes REQ-COM-002's 250 ms assertion immune to wall-clock adjustments.",
+      "source": "src/testlab/client.py::LabClient.request",
+      "concepts": "monotonic timing, buffered reader",
+      "failures": "Empty readline means the DUT closed the connection — reported as LabCommunicationError, not a timeout."
+    }
+  ]
+}

@@ -29,6 +29,53 @@ def reserve_local_port() -> int:
         return int(candidate.getsockname()[1])
 
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+# --dut is registered in the root conftest.py: pytest parses options before
+# loading nested conftests, so a bare `pytest --dut cpp` needs it there.
+
+
+def cpp_dut_path() -> Path | None:
+    """The built C++ DUT, or None when it has not been built on this machine."""
+    for name in ("dut.exe", "dut"):
+        candidate = REPO_ROOT / "cpp" / "build" / "bin" / name
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def dut_command(implementation: str, host: str, port: int, log_path: Path) -> list[str]:
+    """argv for either DUT — the only place the two implementations differ."""
+    if implementation == "cpp":
+        binary = cpp_dut_path()
+        if binary is None:
+            pytest.skip(
+                "the C++ DUT is not built (cmake -S cpp -B cpp/build && "
+                "cmake --build cpp/build)"
+            )
+        return [
+            str(binary),
+            "--host",
+            host,
+            "--port",
+            str(port),
+            "--log-file",
+            str(log_path),
+        ]
+    return [
+        sys.executable,
+        "-m",
+        "simulator.simulator",
+        "--host",
+        host,
+        "--port",
+        str(port),
+        "--log-file",
+        str(log_path),
+    ]
+
+
 @pytest.fixture(scope="session")
 def evidence_dir() -> Path:
     root = Path(os.environ.get("EVIDENCE_DIR", "evidence")).resolve()
@@ -38,23 +85,19 @@ def evidence_dir() -> Path:
 
 
 @pytest.fixture(scope="session")
-def dut(evidence_dir: Path) -> Iterator[RunningDut]:
+def dut_implementation(request: pytest.FixtureRequest) -> str:
+    """'python' or 'cpp' — chosen by --dut / FTL_DUT, defaulting to python."""
+    return str(request.config.getoption("--dut"))
+
+
+@pytest.fixture(scope="session")
+def dut(evidence_dir: Path, dut_implementation: str) -> Iterator[RunningDut]:
     host = "127.0.0.1"
     port = reserve_local_port()
     log_path = evidence_dir / "logs" / "dut.log"
 
     process = subprocess.Popen(
-        [
-            sys.executable,
-            "-m",
-            "simulator.simulator",
-            "--host",
-            host,
-            "--port",
-            str(port),
-            "--log-file",
-            str(log_path),
-        ],
+        dut_command(dut_implementation, host, port, log_path),
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         text=True,
