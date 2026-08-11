@@ -145,23 +145,30 @@ class ProgressStore:
             result: dict[str, Any] = json.loads(json.dumps(self._state))
             return result
 
+    @staticmethod
+    def _empty_lesson_record() -> dict[str, Any]:
+        return {
+            "status": "not_started",
+            "steps_done": [],
+            "validations": {},
+            "quiz_correct": [],
+            "quiz_attempts": 0,
+            "explain_done": [],
+            "attempts": 0,
+            "hints_used": 0,
+            "started_at": None,
+            "completed_at": None,
+        }
+
     def _lesson_record_locked(self, lesson_id: str) -> dict[str, Any]:
         lessons: dict[str, dict[str, Any]] = self._state["lessons"]
-        record = lessons.setdefault(
-            lesson_id,
-            {
-                "status": "not_started",
-                "steps_done": [],
-                "validations": {},
-                "quiz_correct": [],
-                "quiz_attempts": 0,
-                "explain_done": [],
-                "attempts": 0,
-                "hints_used": 0,
-                "started_at": None,
-                "completed_at": None,
-            },
-        )
+        record = lessons.setdefault(lesson_id, self._empty_lesson_record())
+        # Fill any absent keys from the template. The loader tolerates missing
+        # fields (they are optional in a persisted file), so a record like {}
+        # would otherwise reach mark_started and raise KeyError on
+        # "started_at" — a crash instead of the documented recovery.
+        for key, default in self._empty_lesson_record().items():
+            record.setdefault(key, default)
         return record
 
     def mark_started(self, lesson_id: str) -> None:
@@ -190,10 +197,17 @@ class ProgressStore:
         passed: bool,
         *,
         mandatory: bool = True,
+        concepts: tuple[str, ...] = (),
     ) -> None:
         with self._lock:
             record = self._lesson_record_locked(lesson_id)
             record["validations"][block_id] = {"passed": passed, "at": _now()}
+            # A validator outcome is evidence about a concept, exactly as a
+            # quiz answer is. Without this, a learner could fail the same
+            # mandatory check ten times and interview mode would never notice
+            # the concept it exposed — which the mastery model claims it does.
+            if concepts:
+                self._bump_concepts_locked(concepts, passed)
             # Only a *mandatory* check can un-complete a lesson. Some lessons
             # ship a demonstration check that is meant to go red (Day 14's
             # symptom probe); re-running one of those after finishing the
@@ -286,6 +300,14 @@ class ProgressStore:
             missing = ["lesson not started"]
             return False, missing
         missing = []
+        # Prerequisites are part of the gate, not just a roadmap decoration.
+        # Without this a client can complete a locked lesson directly through
+        # the API, and because unlocking trusts stored statuses, that would
+        # cascade: a broken prerequisite chain unlocks everything downstream.
+        lessons_state = self._state["lessons"]
+        for prerequisite in lesson.prerequisites:
+            if lessons_state.get(prerequisite, {}).get("status") != "complete":
+                missing.append(f"prerequisite {prerequisite!r} is not complete")
         validations = record["validations"]
         for block in lesson.mandatory_validators():
             outcome = validations.get(block["id"])

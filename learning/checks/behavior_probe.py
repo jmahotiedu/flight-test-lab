@@ -9,6 +9,7 @@ process is always reaped in ``finally``.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import socket
 import subprocess
@@ -17,7 +18,14 @@ import time
 from pathlib import Path
 from typing import Any
 
-from learning.checks.common import reserve_port
+from learning.checks.common import (
+    CREATION_FLAGS,
+    START_NEW_SESSION,
+    kill_process_tree,
+    register_child,
+    reserve_port,
+    unregister_child,
+)
 from learning.server.validators import (
     CheckResult,
     ValidatorContext,
@@ -208,7 +216,13 @@ def run(args: dict[str, Any], context: ValidatorContext) -> CheckResult:
             text=True,
             encoding="utf-8",
             errors="replace",
+            creationflags=CREATION_FLAGS,
+            start_new_session=START_NEW_SESSION,
         )
+        # Tracked so Ctrl+C during this probe reaps the DUT: the handler thread
+        # is a daemon and this child has its own process group, so nothing else
+        # would stop it holding its port after the server exits.
+        register_child(process)
         try:
             ready = _wait_for_port(host, port, startup_timeout) if wait_ready else True
             if not ready:
@@ -241,8 +255,10 @@ def run(args: dict[str, Any], context: ValidatorContext) -> CheckResult:
                 try:
                     process.wait(timeout=3.0)
                 except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait(timeout=3.0)
+                    kill_process_tree(process)
+                    with contextlib.suppress(subprocess.TimeoutExpired):
+                        process.wait(timeout=3.0)
+            unregister_child(process)
             exit_status = process.returncode
             try:
                 if process.stdout is not None:

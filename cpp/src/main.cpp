@@ -121,6 +121,15 @@ int main(int argc, char** argv) {
     std::cerr << "--fault-delay-ms must not be negative\n";
     return 1;
   }
+  // Zero is as useless as negative for the timing fault: it logs
+  // fault_injected fault=slow and sleeps for nothing, so the run reports an
+  // engaged timing fault that never delayed a response. The Python DUT
+  // rejects the same combination.
+  if (options.fault == dut::Fault::Slow && options.fault_delay_ms == 0) {
+    std::cerr << "--fault slow needs a positive --fault-delay-ms "
+                 "(0 would disable the fault it requests)\n";
+    return 1;
+  }
   if (options.fault_after < 0) {
     std::cerr << "--fault-after must not be negative\n";
     return 1;

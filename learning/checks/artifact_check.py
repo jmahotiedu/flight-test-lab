@@ -10,9 +10,11 @@ from __future__ import annotations
 import csv
 import json
 import re
+import subprocess
 import xml.etree.ElementTree as ET
 from datetime import datetime
 from io import StringIO
+from pathlib import Path
 from typing import Any
 
 from learning.checks.source_check import _resolve_repo_path
@@ -39,8 +41,31 @@ def _describe(value: Any) -> str:
     return rendered if len(rendered) <= 60 else rendered[:57] + "..."
 
 
+def _commit_exists(repo_root: Path, commit: str) -> bool:
+    """True when `commit` names a real commit in this checkout.
+
+    Syntax is not identity: "deadbee" is seven hex characters and describes no
+    repository state, so a manifest containing it would be certified as
+    reproducible while pointing at nothing.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--verify", "--quiet", f"{commit}^{{commit}}"],
+            cwd=str(repo_root),
+            capture_output=True,
+            timeout=15,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return True  # no git available: fall back to the syntax check alone
+    return result.returncode == 0
+
+
 def _check_json_fields(
-    relative: str, document: dict[str, Any], spec: dict[str, Any]
+    relative: str,
+    document: dict[str, Any],
+    spec: dict[str, Any],
+    repo_root: Path,
 ) -> list[str]:
     """Require each named field to be present, correctly typed and filled in.
 
@@ -72,11 +97,18 @@ def _check_json_fields(
             )
             continue
 
-        if rule == "commit" and not re.fullmatch(r"[0-9a-fA-F]{7,40}", value.strip()):
-            failures.append(
-                f"{relative}: {field!r} is not a git commit id "
-                f"({_describe(value)}); use the output of `git rev-parse HEAD`"
-            )
+        if rule == "commit":
+            if not re.fullmatch(r"[0-9a-fA-F]{7,40}", value.strip()):
+                failures.append(
+                    f"{relative}: {field!r} is not a git commit id "
+                    f"({_describe(value)}); use the output of `git rev-parse HEAD`"
+                )
+            elif not _commit_exists(repo_root, value.strip()):
+                failures.append(
+                    f"{relative}: {field!r} ({_describe(value)}) is not a commit "
+                    "in this repository — a manifest has to identify the state "
+                    "that produced the run, not just look like a hash"
+                )
         elif rule == "timestamp":
             try:
                 datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
@@ -165,7 +197,11 @@ def run(args: dict[str, Any], context: ValidatorContext) -> CheckResult:
             if not isinstance(document, dict):
                 failures.append(f"{relative} must contain a JSON object")
             else:
-                failures.extend(_check_json_fields(relative, document, json_fields))
+                failures.extend(
+                    _check_json_fields(
+                        relative, document, json_fields, context.repo_root
+                    )
+                )
 
     junit_testcase = args.get("junit_testcase")
     if isinstance(junit_testcase, str) and text:

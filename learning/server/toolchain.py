@@ -82,7 +82,16 @@ class Toolchain:
 
     @property
     def can_build_cpp(self) -> bool:
-        return bool(self.cmake and self.ctest and self.cxx)
+        if not (self.cmake and self.ctest and self.cxx):
+            return False
+        # On Windows a generator is not optional. Without Ninja or a make,
+        # CMake falls back to Visual Studio even though the detected compiler
+        # is g++ — producing a build the debugger lessons cannot use and a
+        # cache the next check has to reject. Unlocking the module in that
+        # state would offer a lesson whose mandatory path cannot succeed.
+        if sys.platform == "win32":
+            return bool(self.ninja or self.make)
+        return True
 
     @property
     def can_debug(self) -> bool:
@@ -98,7 +107,7 @@ class Toolchain:
     def missing_for(self, requirement: str) -> list[str]:
         """Which tools are absent — the detail the UI shows the learner."""
         if requirement == "cpp-build":
-            return [
+            absent = [
                 name
                 for name, path in (
                     ("cmake", self.cmake),
@@ -107,6 +116,9 @@ class Toolchain:
                 )
                 if not path
             ]
+            if sys.platform == "win32" and not (self.ninja or self.make):
+                absent.append("a generator (ninja, or mingw32-make)")
+            return absent
         if requirement == "gdb":
             return [] if self.gdb else ["gdb"]
         return [requirement]

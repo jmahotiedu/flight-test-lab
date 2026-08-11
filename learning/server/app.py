@@ -442,6 +442,7 @@ class LearningHandler(BaseHTTPRequestHandler):
             str(block_id),
             result.passed,
             mandatory=bool(verify_block.get("mandatory", False)),
+            concepts=lesson.concepts,
         )
         self._send_json(result.to_dict())
 

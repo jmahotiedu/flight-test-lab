@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import socket
+import subprocess
 import time
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -243,26 +245,72 @@ def test_artifact_check_reads_json_values_not_key_names(
     assert expected in result.interpretation
 
 
-def test_artifact_check_accepts_a_filled_in_manifest(tmp_path: Path) -> None:
-    path = tmp_path / "manifest.json"
-    path.write_text(
-        json.dumps(
-            {
-                "commit": "0123456789abcdef0123456789abcdef01234567",
-                "python_version": "3.11.9",
-                "platform": "win32",
-                "dut_config": {"host": "127.0.0.1", "port": 9000},
-                "timestamp": "2026-08-11T04:12:33+00:00",
-            }
-        ),
-        encoding="utf-8",
+def _manifest(commit: str) -> str:
+    return json.dumps(
+        {
+            "commit": commit,
+            "python_version": "3.11.9",
+            "platform": "win32",
+            "dut_config": {"host": "127.0.0.1", "port": 9000},
+            "timestamp": "2026-08-11T04:12:33+00:00",
+        }
+    )
+
+
+@pytest.fixture()
+def manifest_in_repo() -> Iterator[Path]:
+    """A scratch manifest inside the repo.
+
+    The commit rule shells out to git in the repository root, and artifact
+    paths must stay inside the repo, so this cannot live in tmp_path.
+    """
+    target = REPO_ROOT / "evidence" / "exercises" / "manifest-under-test.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        yield target
+    finally:
+        target.unlink(missing_ok=True)
+
+
+def test_artifact_check_accepts_a_filled_in_manifest(manifest_in_repo: Path) -> None:
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    manifest_in_repo.write_text(_manifest(head), encoding="utf-8")
+    result = run_validator(
+        "artifact_check",
+        {
+            "file": str(manifest_in_repo.relative_to(REPO_ROOT).as_posix()),
+            "json_fields": MANIFEST_SPEC,
+        },
+        CONTEXT,
+    )
+    assert result.passed, result.interpretation
+
+
+def test_manifest_commit_must_exist_in_the_repository(manifest_in_repo: Path) -> None:
+    """A plausible-looking hash is not a repository state.
+
+    "deadbeef" is valid hex and identifies nothing, so accepting it would
+    certify a manifest that cannot reproduce the run it describes.
+    """
+    manifest_in_repo.write_text(
+        _manifest("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"), encoding="utf-8"
     )
     result = run_validator(
         "artifact_check",
-        {"file": str(path), "json_fields": MANIFEST_SPEC},
-        ValidatorContext(repo_root=tmp_path),
+        {
+            "file": str(manifest_in_repo.relative_to(REPO_ROOT).as_posix()),
+            "json_fields": MANIFEST_SPEC,
+        },
+        CONTEXT,
     )
-    assert result.passed, result.interpretation
+    assert not result.passed
+    assert "not a commit in this repository" in result.interpretation
 
 
 def test_requirement_marker_must_be_a_real_decorator(tmp_path: Path) -> None:

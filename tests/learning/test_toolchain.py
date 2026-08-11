@@ -10,6 +10,7 @@ suite.
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -26,9 +27,14 @@ from learning.server.validators import ValidatorContext, validator_names
 REPO_ROOT = Path(__file__).resolve().parents[2]
 LEARNING_ROOT = REPO_ROOT / "learning"
 
-FULL = Toolchain(cmake="cmake", ctest="ctest", cxx="g++", gdb="gdb")
+FULL = Toolchain(cmake="cmake", ctest="ctest", cxx="g++", gdb="gdb", ninja="ninja")
 NO_TOOLCHAIN = Toolchain()
-NO_DEBUGGER = Toolchain(cmake="cmake", ctest="ctest", cxx="g++", gdb=None)
+NO_DEBUGGER = Toolchain(
+    cmake="cmake", ctest="ctest", cxx="g++", gdb=None, ninja="ninja"
+)
+# Compiler and debugger but no generator. On Windows CMake would fall back to
+# Visual Studio here, producing a build the debugger lessons cannot use.
+NO_GENERATOR = Toolchain(cmake="cmake", ctest="ctest", cxx="g++", gdb="gdb")
 
 
 def test_toolchain_capabilities() -> None:
@@ -37,6 +43,25 @@ def test_toolchain_capabilities() -> None:
     assert NO_DEBUGGER.can_build_cpp and not NO_DEBUGGER.can_debug
     assert FULL.satisfies("cpp-build") and FULL.satisfies("gdb")
     assert not FULL.satisfies("nonsense-requirement")
+
+
+def test_windows_needs_a_generator_before_unlocking() -> None:
+    """A compiler alone is not enough on Windows.
+
+    Without Ninja or a make, CMake picks Visual Studio even though g++ was
+    detected — so the module would unlock and its mandatory configure/build
+    path could not produce the GNU build the debugger lessons need.
+    """
+    if sys.platform == "win32":
+        assert not NO_GENERATOR.can_build_cpp
+        assert "generator" in " ".join(NO_GENERATOR.missing_for("cpp-build"))
+        assert Toolchain(
+            cmake="cmake", ctest="ctest", cxx="g++", make="mingw32-make"
+        ).can_build_cpp
+    else:
+        # Elsewhere CMake's default generator (Unix Makefiles) works with the
+        # detected compiler, so no extra tool is required.
+        assert NO_GENERATOR.can_build_cpp
 
 
 def test_missing_tools_are_named() -> None:

@@ -153,7 +153,12 @@ void handle_connection(Socket connection, std::string peer,
         line.pop_back();
       }
 
-      log_message(Level::Info, "request peer=" + peer + " payload=" + line);
+      // Log the sanitised form: the raw bytes may not be valid UTF-8, and the
+      // Python DUT decodes with errors="replace" before logging. Writing raw
+      // bytes here would leave dut.log undecodable on native runs only, so an
+      // evidence reader would fail depending on which DUT produced it.
+      log_message(Level::Info,
+                  "request peer=" + peer + " payload=" + sanitize_utf8(line));
       const int request_number = ++g_request_count;
       if (maybe_inject_fault(options, request_number)) {
         return;

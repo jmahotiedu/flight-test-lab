@@ -82,7 +82,10 @@ def test_every_mapped_requirement_is_declared() -> None:
     )
 
 
-@pytest.mark.parametrize("column", ["title", "requirement", "verification_method"])
+@pytest.mark.parametrize(
+    "column",
+    ["title", "requirement", "verification_method", "acceptance_criteria"],
+)
 def test_requirements_are_completely_specified(column: str) -> None:
     """An ID with empty columns is a placeholder, not a requirement."""
     blank = [

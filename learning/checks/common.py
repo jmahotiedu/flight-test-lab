@@ -41,6 +41,22 @@ _ACTIVE: set[subprocess.Popen[str]] = set()
 _ACTIVE_LOCK = threading.Lock()
 
 
+def register_child(process: subprocess.Popen[str]) -> None:
+    """Track a child started outside run_subprocess so shutdown can reap it.
+
+    behavior_probe launches the DUT itself (it has to speak to it), so without
+    this the process would be invisible to terminate_active_validators and
+    could outlive the server that started it.
+    """
+    with _ACTIVE_LOCK:
+        _ACTIVE.add(process)
+
+
+def unregister_child(process: subprocess.Popen[str]) -> None:
+    with _ACTIVE_LOCK:
+        _ACTIVE.discard(process)
+
+
 def terminate_active_validators() -> int:
     """Kill every running validator process tree. Returns how many were live."""
     with _ACTIVE_LOCK:

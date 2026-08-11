@@ -116,8 +116,8 @@
           "mandatory": true,
           "description": "Drives BenchLock through the full ownership cycle in a fresh process — alice acquires, bob is refused, bob's teardown release() must NOT free alice's lock, then alice releases and bob can acquire.",
           "args": {
-            "snippet": "import tempfile, os\nfrom testlab.bench import BenchLock\npath = os.path.join(tempfile.mkdtemp(), 'bench.lock')\na = BenchLock(path, 'alice')\nprint(a.acquire())\nb = BenchLock(path, 'bob')\nprint(b.acquire())\nb.release()\nprint(a.is_locked())\nprint(b.acquire())\na.release()\nprint(b.acquire())\nb.release()\nprint(a.is_locked())",
-            "expect_stdout_regex": "True\\nFalse\\nTrue\\nFalse\\nTrue\\nFalse",
+            "snippet": "import json, tempfile, os\nfrom datetime import datetime\nfrom testlab.bench import BenchLock\npath = os.path.join(tempfile.mkdtemp(), 'bench.lock')\na = BenchLock(path, 'alice')\nprint(a.acquire())\nb = BenchLock(path, 'bob')\nprint(b.acquire())\nb.release()\nprint(a.is_locked())\n# The lock file has to say who holds it and since when, or 'the bench is\n# busy' never becomes 'alice has held it since 14:02'.\nrecord = json.loads(open(path, encoding='utf-8').read())\nprint('owner:', record['owner'])\ndatetime.fromisoformat(record['timestamp'].replace('Z', '+00:00'))\nprint('timestamp: ok')\nprint(b.acquire())\na.release()\nprint(b.acquire())\nb.release()\nprint(a.is_locked())",
+            "expect_stdout_regex": "True\\nFalse\\nTrue\\nowner: alice\\ntimestamp: ok\\nFalse\\nTrue\\nFalse",
             "timeout_seconds": 10,
             "success_note": "Exclusive ownership holds even under teardown: bob's release() left alice's lock intact (a non-owner cannot free the bench), and bob only got in after alice released."
           }

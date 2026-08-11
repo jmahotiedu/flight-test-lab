@@ -75,6 +75,12 @@ class Value {
       storage_;
 };
 
+// Replaces every ill-formed UTF-8 sequence with U+FFFD, one per maximal
+// subpart, exactly as Python's bytes.decode(errors="replace") does.  Exposed
+// because the log writer needs it too: raw request bytes must not reach the
+// evidence file, or dut.log becomes undecodable on native runs only.
+std::string sanitize_utf8(const std::string& text);
+
 // Parses one complete JSON document.  Returns nullopt on any syntax error or
 // on trailing garbage — the DUT treats every parse failure identically
 // (INVALID_JSON), so there is no error detail to propagate.
