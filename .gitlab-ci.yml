@@ -52,7 +52,16 @@ native:
     - pytest -v --dut cpp tests/test_status.py tests/test_protocol.py --junitxml=evidence/junit/test-results-cpp.xml
     - pytest -v tests/test_cpp_dut.py --junitxml=evidence/junit/test-results-parity.xml
   artifacts:
+    # A job-level `artifacts:` replaces the default block wholesale rather
+    # than merging with it, so `paths:` has to be repeated here — without it
+    # evidence/ is not uploaded and ctest-results.xml, which traceability.csv
+    # names as REQ-CPP-001 evidence, disappears with the runner.
+    when: always
+    expire_in: 30 days
+    paths:
+      - evidence/
     reports:
       junit:
+        - evidence/junit/ctest-results.xml
         - evidence/junit/test-results-cpp.xml
         - evidence/junit/test-results-parity.xml

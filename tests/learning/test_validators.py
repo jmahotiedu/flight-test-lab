@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import socket
 import time
 from pathlib import Path
@@ -167,6 +168,101 @@ def test_pytest_check_sandbox_does_not_touch_real_evidence(tmp_path: Path) -> No
     # The DUT log written by the session fixture must NOT appear in the repo
     # evidence tree from this run (sandboxed), and no stray dirs appear.
     assert not sentinel.exists()
+
+
+MANIFEST_SPEC = {
+    "commit": "commit",
+    "python_version": r"^\d+\.\d+",
+    "platform": "string",
+    "dut_config": "object",
+    "timestamp": "timestamp",
+}
+
+
+@pytest.mark.parametrize(
+    ("manifest", "expected"),
+    [
+        (
+            {
+                "commit": "",
+                "python_version": "",
+                "platform": "",
+                "dut_config": {"host": "", "port": 0},
+                "timestamp": "",
+            },
+            "is empty",
+        ),
+        (
+            {
+                "commit": "not-a-sha",
+                "python_version": "3.11",
+                "platform": "win32",
+                "dut_config": {"host": "127.0.0.1", "port": 9000},
+                "timestamp": "2026-08-11T00:00:00+00:00",
+            },
+            "not a git commit id",
+        ),
+        (
+            {
+                "commit": "abc1234",
+                "python_version": "3.11",
+                "platform": "win32",
+                "dut_config": {"host": "127.0.0.1", "port": 9000},
+                "timestamp": "yesterday",
+            },
+            "not an ISO-8601 timestamp",
+        ),
+        (
+            {
+                "commit": "abc1234",
+                "python_version": "3.11",
+                "platform": "win32",
+                "dut_config": {"host": "127.0.0.1", "port": 0},
+                "timestamp": "2026-08-11T00:00:00+00:00",
+            },
+            "placeholder values",
+        ),
+    ],
+)
+def test_artifact_check_reads_json_values_not_key_names(
+    tmp_path: Path, manifest: dict[str, object], expected: str
+) -> None:
+    """A manifest of empty strings must not certify a reproducible run.
+
+    Searching the file text for key names lets the untouched skeleton pass,
+    which is the audit failure mode this whole lesson is about.
+    """
+    path = tmp_path / "manifest.json"
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+    result = run_validator(
+        "artifact_check",
+        {"file": str(path), "json_fields": MANIFEST_SPEC},
+        ValidatorContext(repo_root=tmp_path),
+    )
+    assert not result.passed
+    assert expected in result.interpretation
+
+
+def test_artifact_check_accepts_a_filled_in_manifest(tmp_path: Path) -> None:
+    path = tmp_path / "manifest.json"
+    path.write_text(
+        json.dumps(
+            {
+                "commit": "0123456789abcdef0123456789abcdef01234567",
+                "python_version": "3.11.9",
+                "platform": "win32",
+                "dut_config": {"host": "127.0.0.1", "port": 9000},
+                "timestamp": "2026-08-11T04:12:33+00:00",
+            }
+        ),
+        encoding="utf-8",
+    )
+    result = run_validator(
+        "artifact_check",
+        {"file": str(path), "json_fields": MANIFEST_SPEC},
+        ValidatorContext(repo_root=tmp_path),
+    )
+    assert result.passed, result.interpretation
 
 
 def test_source_check_path_escape_rejected() -> None:

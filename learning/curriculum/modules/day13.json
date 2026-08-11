@@ -94,7 +94,7 @@
         {
           "type": "do",
           "id": "do",
-          "instructions": "Create `src/testlab/bench.py` with a `BenchLock` class:\n\n- `BenchLock(path, owner)` — lock file location and the owner string.\n- `acquire()` — create the lock file atomically (fail if it exists), writing JSON with `owner` and an ISO-8601 `timestamp`; return `True` on success, `False` if the lock is already held.\n- `release()` — delete the lock file.\n- `is_locked()` — `True` while the lock file exists.\n\nThen exercise it in a REPL from the repo root (activate `.venv` first): two BenchLock instances on the same path, and confirm the second cannot acquire until the first releases.\n\n```from testlab.bench import BenchLock\nimport tempfile, os\np = os.path.join(tempfile.mkdtemp(), 'bench.lock')\na, b = BenchLock(p, 'alice'), BenchLock(p, 'bob')\nprint(a.acquire(), b.acquire())   # True False\na.release(); print(b.acquire())   # True\n```\n\nHint 3 has the skeleton if you want the shape first.",
+          "instructions": "Create `src/testlab/bench.py` with a `BenchLock` class:\n\n- `BenchLock(path, owner)` — lock file location and the owner string.\n- `acquire()` — create the lock file atomically (fail if it exists), writing JSON with `owner` and an ISO-8601 `timestamp`; return `True` on success, `False` if the lock is already held.\n- `release()` — free the bench, but only if *this* instance is the one holding it. A controller whose `acquire()` failed must not be able to delete the owner's lock (teardown calls `release()` on every controller, including the ones that never got in).\n- `is_locked()` — `True` while the lock file exists.\n\nThen exercise it in a REPL from the repo root (activate `.venv` first): two BenchLock instances on the same path, and confirm the second cannot acquire until the first releases.\n\n```from testlab.bench import BenchLock\nimport tempfile, os\np = os.path.join(tempfile.mkdtemp(), 'bench.lock')\na, b = BenchLock(p, 'alice'), BenchLock(p, 'bob')\nprint(a.acquire(), b.acquire())   # True False\na.release(); print(b.acquire())   # True\n```\n\nHint 3 has the skeleton if you want the shape first.",
           "command": ".venv\\Scripts\\python"
         },
         {
@@ -114,12 +114,12 @@
           "id": "verify-behavior",
           "validator": "python_probe",
           "mandatory": true,
-          "description": "Drives BenchLock through the full ownership cycle in a fresh process: alice acquires, bob is refused, alice releases, bob acquires.",
+          "description": "Drives BenchLock through the full ownership cycle in a fresh process — alice acquires, bob is refused, bob's teardown release() must NOT free alice's lock, then alice releases and bob can acquire.",
           "args": {
-            "snippet": "import tempfile, os\nfrom testlab.bench import BenchLock\npath = os.path.join(tempfile.mkdtemp(), 'bench.lock')\na = BenchLock(path, 'alice')\nprint(a.acquire())\nb = BenchLock(path, 'bob')\nprint(b.acquire())\na.release()\nprint(b.acquire())\nb.release()",
-            "expect_stdout_regex": "True\\nFalse\\nTrue",
+            "snippet": "import tempfile, os\nfrom testlab.bench import BenchLock\npath = os.path.join(tempfile.mkdtemp(), 'bench.lock')\na = BenchLock(path, 'alice')\nprint(a.acquire())\nb = BenchLock(path, 'bob')\nprint(b.acquire())\nb.release()\nprint(a.is_locked())\nprint(b.acquire())\na.release()\nprint(b.acquire())\nb.release()\nprint(a.is_locked())",
+            "expect_stdout_regex": "True\\nFalse\\nTrue\\nFalse\\nTrue\\nFalse",
             "timeout_seconds": 10,
-            "success_note": "Exclusive ownership works: True / False / True — second controller refused while held, admitted after release."
+            "success_note": "Exclusive ownership holds even under teardown: bob's release() left alice's lock intact (a non-owner cannot free the bench), and bob only got in after alice released."
           }
         },
         {
@@ -133,8 +133,8 @@
       "hints": [
         { "level": 1, "text": "The hard part is making 'create only if absent' atomic — a plain exists() check followed by write() leaves a race window between two acquirers." },
         { "level": 2, "text": "Use os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY) — it raises FileExistsError if the lock is already held. Write JSON: owner + datetime.now(timezone.utc).isoformat()." },
-        { "level": 3, "text": "Skeleton — note the annotations: `src/` is type-checked by strict mypy, so an untyped method here would fail the quality gate you ran on Day 10.\n\n```from __future__ import annotations\n\nimport json\nimport os\nfrom datetime import UTC, datetime\nfrom pathlib import Path\n\n\nclass BenchLock:\n    def __init__(self, path: str | Path, owner: str) -> None:\n        self.path = Path(path)\n        self.owner = owner\n\n    def acquire(self) -> bool:   # atomic create; False on FileExistsError\n        ...\n\n    def release(self) -> None:   # unlink, ignore missing\n        ...\n\n    def is_locked(self) -> bool: # self.path.exists()\n        ...\n```\nLock file contents: {\"owner\": self.owner, \"timestamp\": <ISO-8601 UTC>}." },
-        { "level": 4, "text": "acquire(): try `fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)`; except FileExistsError return False; else os.write(fd, json.dumps({'owner': self.owner, 'timestamp': datetime.now(UTC).isoformat()}).encode()); os.close(fd); return True. release(): `self.path.unlink(missing_ok=True)`. is_locked(): `return self.path.exists()`. Keep the return annotations from hint 3 — `mypy src simulator learning` runs in strict mode and rejects an untyped def." }
+        { "level": 3, "text": "Skeleton — note the annotations: `src/` is type-checked by strict mypy, so an untyped method here would fail the quality gate you ran on Day 10.\n\n```from __future__ import annotations\n\nimport json\nimport os\nfrom datetime import UTC, datetime\nfrom pathlib import Path\n\n\nclass BenchLock:\n    def __init__(self, path: str | Path, owner: str) -> None:\n        self.path = Path(path)\n        self.owner = owner\n        self._held = False   # did *this* instance win the lock?\n\n    def acquire(self) -> bool:   # atomic create; False on FileExistsError\n        ...\n\n    def release(self) -> None:   # release only what this instance holds\n        ...\n\n    def is_locked(self) -> bool: # self.path.exists()\n        ...\n```\nLock file contents: {\"owner\": self.owner, \"timestamp\": <ISO-8601 UTC>}." },
+        { "level": 4, "text": "acquire(): try `fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)`; except FileExistsError return False; else write json.dumps({'owner': self.owner, 'timestamp': datetime.now(UTC).isoformat()}), close, set `self._held = True`, return True.\n\nrelease() must refuse to unlink a lock this instance does not hold:\n\n```    def release(self) -> None:\n        if not self._held:\n            return\n        self.path.unlink(missing_ok=True)\n        self._held = False\n```\n\nWhy the guard matters: teardown normally calls release() in a `finally`, including on the controller whose acquire() returned False. An unconditional unlink there deletes the *owner's* lock and lets a third controller onto the bench while the first is still driving it — the exact collision the lock exists to prevent. Keep the return annotations from hint 3; `mypy src simulator learning` runs strict and rejects an untyped def." }
       ]
     },
     {
@@ -177,11 +177,18 @@
           "id": "verify",
           "validator": "artifact_check",
           "mandatory": true,
-          "description": "Checks that evidence/exercises/manifest.json exists and carries all six configuration-identity keys.",
+          "description": "Checks that all six configuration-identity fields are actually filled in — a real commit id, a parseable ISO-8601 timestamp, and a DUT configuration with no placeholder values. An empty skeleton does not pass.",
           "args": {
             "file": "evidence/exercises/manifest.json",
-            "contains": ["commit", "python_version", "platform", "pytest_selection", "dut_config", "timestamp"],
-            "success_note": "Manifest in place: commit, interpreter, platform, selection, DUT config, and timestamp — this run is now reproducible in principle."
+            "json_fields": {
+              "commit": "commit",
+              "python_version": "^\\d+\\.\\d+",
+              "platform": "string",
+              "pytest_selection": "string",
+              "dut_config": "object",
+              "timestamp": "timestamp"
+            },
+            "success_note": "Manifest complete: a real commit, interpreter version, platform, selection, DUT config and timestamp — this run can actually be reproduced, not just described."
           }
         },
         {
@@ -195,7 +202,7 @@
       "hints": [
         { "level": 1, "text": "Ask: what would I need to know, six months from now, to re-run this exact test and trust a comparison?" },
         { "level": 2, "text": "The six keys come from three sources: git (commit), the interpreter (python_version, platform), and the run itself (pytest_selection, dut_config, timestamp)." },
-        { "level": 3, "text": "Skeleton to fill in at evidence/exercises/manifest.json:\n\n```{\n  \"commit\": \"\",\n  \"python_version\": \"\",\n  \"platform\": \"\",\n  \"pytest_selection\": \"\",\n  \"dut_config\": {\"host\": \"\", \"port\": 0, \"log_file\": \"\"},\n  \"timestamp\": \"\"\n}\n```\nGet commit from `git rev-parse HEAD`, platform from `python -c \"import sys; print(sys.platform)\"`." },
+        { "level": 3, "text": "Skeleton to fill in at evidence/exercises/manifest.json — every value has to be replaced with a real one, because the check reads the values, not the key names:\n\n```{\n  \"commit\": \"\",\n  \"python_version\": \"\",\n  \"platform\": \"\",\n  \"pytest_selection\": \"\",\n  \"dut_config\": {\"host\": \"\", \"port\": 0, \"log_file\": \"\"},\n  \"timestamp\": \"\"\n}\n```\nGet commit from `git rev-parse HEAD`, platform from `python -c \"import sys; print(sys.platform)\"`. A manifest of empty strings is exactly the kind of evidence that looks complete in an audit and reproduces nothing." },
         { "level": 4, "text": "Generate it programmatically instead of by hand:\n\n```python -c \"import json, subprocess, sys, pathlib; from datetime import datetime, timezone; m = {'commit': subprocess.check_output(['git','rev-parse','HEAD'], text=True).strip(), 'python_version': sys.version.split()[0], 'platform': sys.platform, 'pytest_selection': 'tests/test_status.py', 'dut_config': {'host': '127.0.0.1', 'port': 9000, 'log_file': 'evidence/logs/dut.log'}, 'timestamp': datetime.now(timezone.utc).isoformat()}; p = pathlib.Path('evidence/exercises'); p.mkdir(parents=True, exist_ok=True); (p/'manifest.json').write_text(json.dumps(m, indent=2))\"\n```" }
       ]
     }

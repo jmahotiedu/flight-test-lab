@@ -69,6 +69,11 @@ PARITY_REQUESTS = (
     '{"command": "status", "sequence": 9223372036854775807}',
     '{"command": "status", "sequence": 9223372036854775808}',
     '{"command": "status", "sequence": -99999999999999999999}',
+    # Duplicate members: Python keeps the last occurrence, so a permissive
+    # parser that keeps the first answers a different request entirely.
+    '{"command": "launch", "command": "status", "sequence": 1}',
+    '{"command": "status", "sequence": 1, "sequence": 2}',
+    '{"command": "status", "sequence": {"a": 1, "a": 2}}',
     # Structural edge cases.
     '{"command": "status", "sequence": 1,}',
     '{"command": "status" "sequence": 1}',

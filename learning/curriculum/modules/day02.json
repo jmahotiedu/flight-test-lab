@@ -141,7 +141,7 @@
           "type": "learn",
           "id": "learn",
           "text": "Test-first means the test is the executable form of the requirement: REQ-PROTO-003 says a `ping` command returns `{\"status\": \"ok\", \"reply\": \"pong\", \"sequence\": N}`. You write that as a pytest function **before** the behavior exists.\n\nThen you run it and watch it **fail for the right reason** — the DUT answers `UNSUPPORTED_COMMAND`, proving the test really observes the missing behavior. A test that fails at collection time (typo, bad import) proves nothing.\n\nOnly then do you implement the smallest change that turns it green: one branch in `build_response()`.",
-          "more": "The red step is a falsification control. A test you never saw fail might be green for the wrong reason — asserting a dict that is always equal to itself, hitting the wrong fixture, never executing at all. Watching it fail with the *expected* diff (wanted reply pong, got error UNSUPPORTED_COMMAND) validates the test and the requirement in one move; the green run then validates the implementation. This is the discipline behind the `@pytest.mark.requirement(\"REQ-PROTO-003\")` marker too: the marker links the test to the requirement so the traceability CSV (day 7) can prove coverage. The implementation itself is deliberately boring — a second `if command ==` branch next to `status`, returning the echoed `sequence`. If your implementation touches anything else, it is bigger than the requirement."
+          "more": "The red step is a falsification control. A test you never saw fail might be green for the wrong reason — asserting a dict that is always equal to itself, hitting the wrong fixture, never executing at all. Watching it fail with the *expected* diff (wanted reply pong, got error UNSUPPORTED_COMMAND) validates the test and the requirement in one move; the green run then validates the implementation. This is the discipline behind the `@pytest.mark.requirement(\"REQ-PROTO-003\")` marker too — but note the order the exercise puts it in: the requirement gets **declared in the register first**, because a marker naming an ID that exists nowhere is a dangling reference that looks like traceability and proves nothing. `--strict-markers` catches an unregistered *marker name*; nothing in pytest checks that the ID inside it is real. That is why the exercise ends by adding the traceability row too, closing requirement → test → evidence (Day 7 goes deeper). The implementation itself is deliberately boring — a second `if command ==` branch next to `status`, returning the echoed `sequence`. If your implementation touches anything else, it is bigger than the requirement."
         },
         {
           "type": "predict",
@@ -159,7 +159,7 @@
         {
           "type": "do",
           "id": "do",
-          "instructions": "1. Create `tests/test_ping.py` modeled on `tests/test_status.py`: one test, the `lab_client` fixture, `@pytest.mark.requirement(\"REQ-PROTO-003\")`, asserting the full payload dict. (Hint level 3 has the exact content if you want it.)\n\n2. Run it and READ the failure:\n\n```python -m pytest tests/test_ping.py -v\n```\n\nThe failure must show the DUT answered `UNSUPPORTED_COMMAND` — that is the correct red.\n\n3. Run the **v-fail-first** check below now, before touching the simulator. It passes only if the test fails.\n\n4. Implement: in `simulator/simulator.py`, add a `ping` branch to `build_response()` next to the `status` branch, returning `{\"status\": \"ok\", \"reply\": \"pong\", \"sequence\": sequence}`.\n\n5. Re-run pytest — green — then run **v-pass** and **v-behavior**.",
+          "instructions": "1. **Declare the requirement before you test it.** REQ-PROTO-003 does not exist yet — a marker pointing at an undeclared ID is a dangling reference, not traceability. Add this row to `requirements/software_requirements.csv`:\n\n```REQ-PROTO-003,Ping command,\"The DUT shall answer a ping command with reply pong and the request's sequence.\",Test,\"A ping request returns status ok, reply pong, and the same sequence value.\"\n```\n\n2. Create `tests/test_ping.py` modeled on `tests/test_status.py`: one test, the `lab_client` fixture, `@pytest.mark.requirement(\"REQ-PROTO-003\")`, asserting the full payload dict. (Hint level 3 has the exact content if you want it.)\n\n3. Run it and READ the failure:\n\n```python -m pytest tests/test_ping.py -v\n```\n\nThe failure must show the DUT answered `UNSUPPORTED_COMMAND` — that is the correct red.\n\n4. Run the **v-fail-first** check below now, before touching the simulator. It passes only if the test fails.\n\n5. Implement: in `simulator/simulator.py`, add a `ping` branch to `build_response()` next to the `status` branch, returning `{\"status\": \"ok\", \"reply\": \"pong\", \"sequence\": sequence}`.\n\n6. Close the chain — add the mapping row to `requirements/traceability.csv`:\n\n```REQ-PROTO-003,tests/test_ping.py::test_ping_returns_pong,evidence/junit/test-results.xml\n```\n\n7. Re-run pytest — green — then run the remaining checks below.",
           "command": "python -m pytest tests/test_ping.py -v"
         },
         {
@@ -197,6 +197,30 @@
               { "send": { "command": "ping", "sequence": 3 }, "expect": { "status": "ok", "reply": "pong", "sequence": 3 }, "max_elapsed_ms": 1000 }
             ],
             "success_note": "ping -> pong with the sequence echoed, verified against a live DUT over a real socket. The test and the wire agree: REQ-PROTO-003 is implemented."
+          }
+        },
+        {
+          "type": "verify",
+          "id": "v-requirement-declared",
+          "validator": "artifact_check",
+          "mandatory": true,
+          "description": "Checks that REQ-PROTO-003 is actually declared in the requirements register — a marker pointing at an ID that exists nowhere is a dangling reference, not traceability.",
+          "args": {
+            "file": "requirements/software_requirements.csv",
+            "csv_row": { "requirement_id": "REQ-PROTO-003" },
+            "success_note": "REQ-PROTO-003 is a declared requirement, so the marker on your test points at something real."
+          }
+        },
+        {
+          "type": "verify",
+          "id": "v-traceability-row",
+          "validator": "artifact_check",
+          "mandatory": true,
+          "description": "Checks that the requirement is mapped to the test that verifies it, closing requirement -> test -> evidence for the command you just added.",
+          "args": {
+            "file": "requirements/traceability.csv",
+            "csv_row": { "requirement_id": "REQ-PROTO-003" },
+            "success_note": "The chain is closed: REQ-PROTO-003 is declared, verified by a test, and mapped to the evidence that test produces. Day 7 goes deeper on this."
           }
         },
         {

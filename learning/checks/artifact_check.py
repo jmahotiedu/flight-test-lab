@@ -8,13 +8,77 @@ stay inside the repository.
 from __future__ import annotations
 
 import csv
+import json
 import re
 import xml.etree.ElementTree as ET
+from datetime import datetime
 from io import StringIO
 from typing import Any
 
 from learning.checks.source_check import _resolve_repo_path
 from learning.server.validators import CheckResult, ValidatorContext, truncate
+
+
+def _describe(value: Any) -> str:
+    rendered = repr(value)
+    return rendered if len(rendered) <= 60 else rendered[:57] + "..."
+
+
+def _check_json_fields(
+    relative: str, document: dict[str, Any], spec: dict[str, Any]
+) -> list[str]:
+    """Require each named field to be present, correctly typed and filled in.
+
+    Spec values are rules: "string" (non-empty), "object" (non-empty),
+    "commit" (40 hex characters), "timestamp" (ISO-8601 parseable), or a regex
+    string the value must match.
+    """
+    failures: list[str] = []
+    for field, rule in spec.items():
+        if field not in document:
+            failures.append(f"{relative} is missing {field!r}")
+            continue
+        value = document[field]
+
+        if rule == "object":
+            if not isinstance(value, dict) or not value:
+                failures.append(f"{relative}: {field!r} must be a non-empty object")
+            elif any(v in ("", None, 0) for v in value.values()):
+                failures.append(
+                    f"{relative}: {field!r} still has placeholder values "
+                    f"({_describe(value)}) — fill in the real configuration"
+                )
+            continue
+
+        if not isinstance(value, str) or not value.strip():
+            failures.append(
+                f"{relative}: {field!r} is empty — the skeleton has to be "
+                f"filled in with the real value, got {_describe(value)}"
+            )
+            continue
+
+        if rule == "commit" and not re.fullmatch(r"[0-9a-fA-F]{7,40}", value.strip()):
+            failures.append(
+                f"{relative}: {field!r} is not a git commit id "
+                f"({_describe(value)}); use the output of `git rev-parse HEAD`"
+            )
+        elif rule == "timestamp":
+            try:
+                datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+            except ValueError:
+                failures.append(
+                    f"{relative}: {field!r} is not an ISO-8601 timestamp "
+                    f"({_describe(value)})"
+                )
+        elif (
+            isinstance(rule, str)
+            and rule not in ("string", "commit", "timestamp")
+            and not re.search(rule, value)
+        ):
+            failures.append(
+                f"{relative}: {field!r} does not match /{rule}/ ({_describe(value)})"
+            )
+    return failures
 
 
 def run(args: dict[str, Any], context: ValidatorContext) -> CheckResult:
@@ -52,6 +116,21 @@ def run(args: dict[str, Any], context: ValidatorContext) -> CheckResult:
                 f"{relative} has no row matching {csv_row} "
                 f"(columns present: {preview or 'none'})"
             )
+
+    # json_fields checks the *values*, not just that a key name appears
+    # somewhere in the text.  Searching for key names lets an empty skeleton
+    # pass, which would certify a manifest that cannot reproduce anything.
+    json_fields = args.get("json_fields")
+    if isinstance(json_fields, dict) and text:
+        try:
+            document = json.loads(text)
+        except json.JSONDecodeError as exc:
+            failures.append(f"{relative} is not valid JSON ({exc})")
+        else:
+            if not isinstance(document, dict):
+                failures.append(f"{relative} must contain a JSON object")
+            else:
+                failures.extend(_check_json_fields(relative, document, json_fields))
 
     junit_testcase = args.get("junit_testcase")
     if isinstance(junit_testcase, str) and text:

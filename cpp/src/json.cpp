@@ -123,7 +123,21 @@ class Parser {
       if (!value) {
         return std::nullopt;
       }
-      object.emplace_back(std::move(*key), std::move(*value));
+      // A repeated key replaces the earlier one, in place, so the last
+      // occurrence wins and only one copy is serialised.  That is what
+      // Python's json.loads does: {"command": "launch", "command": "status"}
+      // is a status request there, and anything else here would be both a
+      // wrong answer and a parity divergence.
+      auto existing = std::find_if(
+          object.begin(), object.end(),
+          [&](const std::pair<std::string, Value>& entry) {
+            return entry.first == *key;
+          });
+      if (existing != object.end()) {
+        existing->second = std::move(*value);
+      } else {
+        object.emplace_back(std::move(*key), std::move(*value));
+      }
       skip_whitespace();
       if (consume(',')) {
         continue;
