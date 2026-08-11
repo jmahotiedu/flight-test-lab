@@ -120,21 +120,25 @@ def _creates_exclusively(node: ast.AST) -> bool:
     )
 
     if name == "open":
-        # os.open's flags are the 2nd argument; builtin open's mode is too.
+        # os.open's flags and builtin open's mode can each be positional or
+        # keyword. Both spellings are searched for both properties: looking
+        # for O_EXCL in positional arguments only rejected
+        # `os.open(path, flags=os.O_CREAT | os.O_EXCL)`, which is ordinary
+        # code and passes every behavioural probe.
+        candidates = list(node.args[1:])
+        candidates += [kw.value for kw in node.keywords if kw.arg in ("mode", "flags")]
         if any(
             isinstance(inner, ast.Attribute | ast.Name)
             and (getattr(inner, "attr", None) or getattr(inner, "id", None)) == "O_EXCL"
-            for argument in node.args[1:]
+            for argument in candidates
             for inner in ast.walk(argument)
         ):
             return True
-        modes = [node.args[1]] if len(node.args) > 1 else []
-        modes += [kw.value for kw in node.keywords if kw.arg in ("mode", "flags")]
         return any(
             isinstance(mode, ast.Constant)
             and isinstance(mode.value, str)
             and "x" in mode.value
-            for mode in modes
+            for mode in candidates
         )
 
     if name == "touch":
@@ -156,6 +160,55 @@ def _creates_exclusively(node: ast.AST) -> bool:
         )
 
     return name in ("link", "symlink")
+
+
+def _mentions_lock(node: ast.AST) -> bool:
+    """Does this `with` header name something lock-shaped?
+
+    Deliberately a name test rather than type inference: the value is created
+    at module scope by `threading.Lock()` and there is no way to follow that
+    statically without a type checker.  A learner who calls their lock
+    something else gets a message saying exactly what the check looked for.
+    """
+    for inner in ast.walk(node):
+        text = getattr(inner, "attr", None) or getattr(inner, "id", None)
+        if isinstance(text, str) and "lock" in text.lower():
+            return True
+    return False
+
+
+def _unguarded_uses(node: ast.AST, target: str, guarded: bool) -> list[int]:
+    """Lines where `target` is referenced outside a lock-holding `with`.
+
+    Reads count, not just writes: a `current = _counter` outside the lock and
+    a `_counter = current + 1` inside it is still the lost update, and is the
+    shape the lesson walks the learner through.
+    """
+    if isinstance(node, ast.With | ast.AsyncWith):
+        holds = guarded or any(_mentions_lock(item.context_expr) for item in node.items)
+        offenders: list[int] = []
+        for item in node.items:
+            offenders += _unguarded_uses(item.context_expr, target, guarded)
+        for child in node.body:
+            offenders += _unguarded_uses(child, target, holds)
+        return offenders
+    if isinstance(node, ast.Name) and node.id == target:
+        return [] if guarded else [node.lineno]
+    found: list[int] = []
+    for descendant in ast.iter_child_nodes(node):
+        found += _unguarded_uses(descendant, target, guarded)
+    return found
+
+
+def _branch_on_constant(tree: ast.AST, value: str) -> ast.If | None:
+    """The `if` whose test compares something to `value`."""
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.If):
+            continue
+        for inner in ast.walk(node.test):
+            if isinstance(inner, ast.Constant) and inner.value == value:
+                return node
+    return None
 
 
 def _function_named(tree: ast.AST, name: str) -> ast.AST | None:
@@ -228,6 +281,50 @@ def run(args: dict[str, Any], context: ValidatorContext) -> CheckResult:
                     "already exists, and a check-then-write does not. The "
                     "identifier appearing in a comment is not the operation"
                 )
+
+    lock_spec = args.get("must_hold_lock")
+    if lock_spec is not None and text:
+        if not isinstance(lock_spec, dict):
+            raise ValueError(
+                "must_hold_lock takes an object: "
+                "{'branch': <string the if compares to>, 'target': <name>}"
+            )
+        branch_value = str(lock_spec["branch"])
+        guarded_name = str(lock_spec["target"])
+        try:
+            tree = ast.parse(text)
+        except SyntaxError as exc:
+            failures.append(f"{relative} does not parse as Python: {exc}")
+        else:
+            branch = _branch_on_constant(tree, branch_value)
+            if branch is None:
+                failures.append(
+                    f"{relative} has no branch on {branch_value!r} — the check "
+                    "cannot inspect an implementation it cannot find"
+                )
+            elif not any(
+                isinstance(node, ast.Name) and node.id == guarded_name
+                for node in ast.walk(branch)
+            ):
+                failures.append(
+                    f"{relative}: the {branch_value!r} branch never touches "
+                    f"{guarded_name!r}"
+                )
+            else:
+                # A behavioural probe cannot carry this: CPython's read and
+                # store usually complete inside one scheduling quantum, so an
+                # unlocked counter prints the right total nearly every run and
+                # the gate would certify the exact bug the lesson is about.
+                offenders = _unguarded_uses(branch, guarded_name, guarded=False)
+                if offenders:
+                    failures.append(
+                        f"{relative}: {guarded_name} is read or written outside "
+                        f"a lock at line(s) {', '.join(map(str, offenders))} — "
+                        "wrap the whole read-modify-write in `with "
+                        "<something>_lock:`. The GIL makes an unlocked counter "
+                        "produce the right answer almost every run; that is "
+                        "why this is checked in the source and not by counting"
+                    )
 
     # Every condition here must hold on ONE function. Checking "some function
     # is marked" and "some function is parametrized" separately lets a marked

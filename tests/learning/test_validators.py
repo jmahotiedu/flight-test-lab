@@ -927,6 +927,153 @@ def test_other_exclusive_create_idioms_are_accepted(
     assert result.passed, result.interpretation
 
 
+EXCLUSIVE_CREATE_FORMS = {
+    "positional flags": "os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)",
+    # Ordinary code that passes the deterministic race probe and failed the
+    # shape gate, because the O_EXCL search read positional arguments only.
+    "keyword flags": "os.open(self.path, flags=os.O_CREAT | os.O_EXCL)",
+    "from-import": "os.open(self.path, O_CREAT | O_EXCL)",
+    "mode keyword": "open(self.path, mode='x', encoding='utf-8')",
+}
+
+LOCK_MODULE = """from __future__ import annotations
+
+import os
+from pathlib import Path
+
+
+class BenchLock:
+    def __init__(self, path: str, owner: str) -> None:
+        self.path = Path(path)
+        self._held = False
+
+    def acquire(self) -> bool:
+        try:
+            handle = {call}
+        except FileExistsError:
+            return False
+        self._held = True
+        return True
+
+    def release(self) -> None:
+        self._held = False
+"""
+
+
+@pytest.mark.parametrize("form", sorted(EXCLUSIVE_CREATE_FORMS))
+def test_every_spelling_of_exclusive_create_is_accepted(
+    bench_module: Path, form: str
+) -> None:
+    """The gate must not demand one spelling of a standard call.
+
+    A learner who writes `flags=` rather than a positional argument has
+    written the same syscall, passes the deterministic race probe, and was
+    blocked from finishing Day 13 by the shape check alone.
+    """
+    bench_module.write_text(
+        LOCK_MODULE.format(call=EXCLUSIVE_CREATE_FORMS[form]), encoding="utf-8"
+    )
+    result = run_validator("source_check", _shape_gate(bench_module), CONTEXT)
+    assert result.passed, result.interpretation
+
+
+COUNTER_MODULE = """import threading
+
+_counter = 0
+_counter_lock = threading.Lock()
+
+
+def build_response(message):
+    command = message.get("command")
+    if command == "status":
+        return {{"state": "READY"}}
+{branch}
+    return {{"error_code": "UNSUPPORTED_COMMAND"}}
+"""
+
+# The shape the lesson leaves behind once its diagnostic time.sleep(0) is
+# removed: measured five runs out of five printing the right total, so the
+# behavioural probe certifies it.
+UNLOCKED_BRANCH = """    if command == "counter":
+        global _counter
+        current = _counter
+        _counter = current + 1
+        return {"count": _counter}
+"""
+
+STORE_ONLY_BRANCH = """    if command == "counter":
+        global _counter
+        current = _counter
+        with _counter_lock:
+            _counter = current + 1
+        return {"count": _counter}
+"""
+
+NOT_A_LOCK_BRANCH = """    if command == "counter":
+        global _counter
+        with open("x") as handle:
+            _counter += 1
+        return {"count": _counter}
+"""
+
+WHOLE_RMW_BRANCH = """    if command == "counter":
+        global _counter
+        with _counter_lock:
+            current = _counter
+            _counter = current + 1
+            count = _counter
+        return {"count": count}
+"""
+
+AUGMENTED_BRANCH = """    if command == "counter":
+        global _counter
+        with _counter_lock:
+            _counter += 1
+            count = _counter
+        return {"count": count}
+"""
+
+OTHER_LOCK_NAME_BRANCH = """    if command == "counter":
+        global _counter
+        with _bench_lock:
+            _counter += 1
+            count = _counter
+        return {"count": count}
+"""
+
+LOCK_GATE = {"must_hold_lock": {"branch": "counter", "target": "_counter"}}
+
+
+@pytest.mark.parametrize(
+    ("label", "branch", "expected"),
+    [
+        ("unlocked", UNLOCKED_BRANCH, False),
+        ("lock around the store only", STORE_ONLY_BRANCH, False),
+        ("a context manager that is not a lock", NOT_A_LOCK_BRANCH, False),
+        ("whole read-modify-write", WHOLE_RMW_BRANCH, True),
+        ("augmented assignment", AUGMENTED_BRANCH, True),
+        ("a differently named lock", OTHER_LOCK_NAME_BRANCH, True),
+    ],
+)
+def test_the_counter_lock_is_checked_in_the_source(
+    tmp_path: Path, label: str, branch: str, expected: bool
+) -> None:
+    """The GIL hides this race, so behaviour cannot be the gate.
+
+    With the diagnostic sleep removed, CPython finishes the read and the store
+    inside one scheduling quantum, so an unlocked counter prints the right
+    total on nearly every run — while the lock is the lesson's whole objective.
+    """
+    target = tmp_path / "simulator.py"
+    target.write_text(COUNTER_MODULE.format(branch=branch), encoding="utf-8")
+    result = run_validator(
+        "source_check",
+        {"file": str(target), **LOCK_GATE},
+        ValidatorContext(repo_root=tmp_path),
+    )
+    assert result.passed is expected, result.interpretation
+
+
 SEQUENCE_ECHO_TEST = """import pytest
 
 {decorator}def test_sequence_echo_on_status_response(lab_client):

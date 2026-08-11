@@ -95,6 +95,63 @@ class LearningHandler(BaseHTTPRequestHandler):
     def _send_error_json(self, status: HTTPStatus, message: str) -> None:
         self._send_json({"error": message}, status)
 
+    def _same_origin(self) -> str | None:
+        """None when the request may mutate state; otherwise why it may not.
+
+        Binding to 127.0.0.1 keeps other machines out; it does not keep out a
+        page the learner has open in the same browser.  A cross-origin form or
+        `fetch(..., {mode: "no-cors"})` with Content-Type text/plain is a
+        "simple request": no preflight, so the browser sends it and this
+        server would answer.  /api/validate starts pytest, CMake, a DUT or
+        gdb, so that is a page on the internet spawning processes here.
+
+        Three checks, each of which a browser cannot be talked out of:
+
+        * Content-Type must be application/json.  That alone is not a simple
+          request, so any cross-origin attempt needs a preflight, which this
+          server never approves (it sends no CORS headers).
+        * Origin, when present, must be this server.  Browsers attach it to
+          every cross-origin POST.
+        * Host must be loopback, which stops DNS rebinding from turning
+          evil.example into 127.0.0.1 for the same document.
+
+        Non-browser clients (curl, the tests) send no Origin and are
+        unaffected; the point is not to authenticate, it is to make sure a
+        *browser* cannot be used as the confused deputy.
+        """
+        content_type = (self.headers.get("Content-Type") or "").split(";")[0].strip()
+        if content_type.lower() != "application/json":
+            return "Content-Type must be application/json"
+
+        host = (self.headers.get("Host") or "").rsplit(":", 1)[0].strip("[]")
+        if host and host not in ("127.0.0.1", "localhost", "::1"):
+            return f"unexpected Host {host!r}; this server is loopback-only"
+
+        origin = self.headers.get("Origin")
+        if origin is not None:
+            allowed = {
+                f"http://{name}:{self.server.server_address[1]}"
+                for name in ("127.0.0.1", "localhost")
+            }
+            if origin not in allowed:
+                return f"cross-origin request from {origin!r} is not allowed"
+
+        # Sent by current browsers and not forgeable by page script; absent on
+        # non-browser clients, so it can only ever add a rejection.
+        site = self.headers.get("Sec-Fetch-Site")
+        if site is not None and site not in ("same-origin", "none"):
+            return f"cross-site request (Sec-Fetch-Site: {site})"
+        return None
+
+    def _discard_body(self) -> None:
+        """Consume the request body so the connection can close cleanly."""
+        remaining = min(int(self.headers.get("Content-Length") or 0), 64 * 1024)
+        while remaining > 0:
+            chunk = self.rfile.read(min(remaining, 8192))
+            if not chunk:
+                break
+            remaining -= len(chunk)
+
     def _read_body(self) -> dict[str, Any] | None:
         length = int(self.headers.get("Content-Length") or 0)
         if length <= 0 or length > 64 * 1024:
@@ -167,6 +224,18 @@ class LearningHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         path = urlparse(self.path).path
+        # Checked before the body is read, so a rejected request costs nothing
+        # and never reaches a handler.
+        refusal = self._same_origin()
+        if refusal is not None:
+            # Drain first. Replying without consuming the body leaves unread
+            # bytes in the socket, and closing on those sends a TCP reset that
+            # destroys the response before the client reads it — measured as
+            # an intermittent ConnectionAbortedError instead of the 403 that
+            # says what was wrong. A refusal has to be legible to be useful.
+            self._discard_body()
+            self._send_error_json(HTTPStatus.FORBIDDEN, refusal)
+            return
         body = self._read_body()
         if body is None:
             self._send_error_json(HTTPStatus.BAD_REQUEST, "invalid JSON body")

@@ -308,3 +308,92 @@ def test_a_crashing_validator_does_not_mark_the_learner_weak(
     )
     after = server.progress.concept_mastery(server.curriculum.concepts)
     assert after == before
+
+
+def _raw_post(
+    server: LearningServer, headers: dict[str, str], path: str = "/api/step"
+) -> tuple[int, dict]:
+    host, port = server.server_address[:2]
+    body = json.dumps(
+        {"lesson_id": "d1-import-no-side-effects", "block_id": "learn", "kind": "learn"}
+    )
+    connection = http.client.HTTPConnection(str(host), port, timeout=30)
+    connection.request("POST", path, body=body, headers=headers)
+    response = connection.getresponse()
+    data = json.loads(response.read())
+    connection.close()
+    return response.status, data
+
+
+@pytest.mark.parametrize(
+    ("label", "headers"),
+    [
+        # A "simple request": no preflight, so a page on any origin can send
+        # it and the browser will not stop it.
+        ("text/plain from a foreign page", {"Content-Type": "text/plain"}),
+        ("form encoding", {"Content-Type": "application/x-www-form-urlencoded"}),
+        ("no content type at all", {}),
+    ],
+)
+def test_a_cross_origin_simple_post_is_refused(
+    server: LearningServer, label: str, headers: dict[str, str]
+) -> None:
+    """Loopback binding keeps other machines out, not other pages.
+
+    /api/validate starts pytest, CMake, a DUT or gdb, so accepting a POST that
+    any website can make is a page on the internet spawning processes on this
+    machine. Requiring application/json means a cross-origin attempt needs a
+    preflight, which this server never answers.
+    """
+    status, data = _raw_post(server, {**headers, "Origin": "http://evil.example"})
+    assert status == 403
+    assert "application/json" in data["error"]
+
+
+def test_a_foreign_origin_is_refused_even_with_json(server: LearningServer) -> None:
+    status, data = _raw_post(
+        server,
+        {"Content-Type": "application/json", "Origin": "http://evil.example"},
+    )
+    assert status == 403
+    assert "cross-origin" in data["error"]
+
+
+def test_a_foreign_host_header_is_refused(server: LearningServer) -> None:
+    """DNS rebinding: the document's origin stays evil.example while the name
+    resolves to 127.0.0.1, so Origin looks consistent and Host does not."""
+    status, data = _raw_post(
+        server, {"Content-Type": "application/json", "Host": "evil.example"}
+    )
+    assert status == 403
+    assert "loopback" in data["error"]
+
+
+def test_a_cross_site_fetch_marker_is_refused(server: LearningServer) -> None:
+    status, data = _raw_post(
+        server,
+        {"Content-Type": "application/json", "Sec-Fetch-Site": "cross-site"},
+    )
+    assert status == 403
+    assert "cross-site" in data["error"]
+
+
+def test_the_app_and_non_browser_clients_still_work(server: LearningServer) -> None:
+    """The guard must not lock out the UI, curl, or this suite.
+
+    Nothing here is authentication — a non-browser client sends no Origin and
+    is unaffected. The point is that a *browser* cannot be used as the
+    confused deputy.
+    """
+    host, port = server.server_address[:2]
+    same_origin, _ = _raw_post(
+        server,
+        {
+            "Content-Type": "application/json",
+            "Origin": f"http://127.0.0.1:{port}",
+            "Sec-Fetch-Site": "same-origin",
+        },
+    )
+    assert same_origin == 200
+    no_origin, _ = _raw_post(server, {"Content-Type": "application/json"})
+    assert no_origin == 200

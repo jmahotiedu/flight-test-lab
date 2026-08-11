@@ -129,6 +129,21 @@
           }
         },
         {
+          "type": "verify",
+          "id": "v-lock",
+          "validator": "source_check",
+          "mandatory": true,
+          "description": "Parses the \"counter\" branch of build_response and requires every read and write of _counter to sit inside a `with ..._lock:`. The probe below cannot carry this: with the diagnostic time.sleep(0) removed, CPython completes the read and the store inside one scheduling quantum, so an unlocked counter prints the right total on nearly every run — measured five for five. A gate that passes the bug the lesson is about is worse than no gate.",
+          "args": {
+            "file": "simulator/simulator.py",
+            "must_hold_lock": {
+              "branch": "counter",
+              "target": "_counter"
+            },
+            "success_note": "The whole read-modify-write is under the lock, not just the store. Guarding only the write leaves the classic lost update: two threads read the same value, then both write their own successor."
+          }
+        },
+        {
           "type": "explain",
           "id": "explain",
           "question": "What exactly does the lock serialize, and why is the race in the read-modify-write sequence rather than in 'integer increment' itself?",
