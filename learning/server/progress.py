@@ -78,11 +78,22 @@ def _record_is_valid(section: str, record: dict[str, Any]) -> bool:
         if status is not None and not isinstance(status, str):
             return False
         validations = record.get("validations")
-        if validations is not None and (
-            not isinstance(validations, dict)
-            or not all(isinstance(v, dict) for v in validations.values())
-        ):
-            return False
+        if validations is not None:
+            if not isinstance(validations, dict):
+                return False
+            for outcome in validations.values():
+                # "passed" is the field a mandatory gate is read from, and it
+                # is read for truth. {"passed": "false"} is a non-empty string,
+                # so a damaged file would certify the lesson instead of taking
+                # the documented backup-and-reset path.
+                if not isinstance(outcome, dict):
+                    return False
+                verdict = outcome.get("passed")
+                if verdict is not None and not isinstance(verdict, bool):
+                    return False
+                at = outcome.get("at")
+                if at is not None and not isinstance(at, str):
+                    return False
     return True
 
 
@@ -104,7 +115,11 @@ class ProgressStore:
             return _empty_state()
         try:
             data = json.loads(self._path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
+        # UnicodeDecodeError is neither an OSError nor a JSONDecodeError, so a
+        # progress file with a truncated multi-byte sequence — the shape a
+        # crash mid-write leaves behind — would otherwise take down the server
+        # at import instead of taking the documented reset path.
+        except (json.JSONDecodeError, OSError, UnicodeError):
             self._backup_locked()
             return _empty_state()
         if not isinstance(data, dict) or data.get("version") != STATE_VERSION:
@@ -358,7 +373,10 @@ class ProgressStore:
         validations = record["validations"]
         for block in lesson.mandatory_validators():
             outcome = validations.get(block["id"])
-            if not outcome or not outcome.get("passed"):
+            # `is True`, not truthiness: only a real boolean recorded by
+            # record_validation counts as a pass. The loader rejects anything
+            # else, and this is the second lock on the same door.
+            if not isinstance(outcome, dict) or outcome.get("passed") is not True:
                 missing.append(f"mandatory validation {block['id']!r} not passed")
         for block_id in lesson.required_quiz_ids():
             if block_id not in record["quiz_correct"]:
@@ -381,6 +399,27 @@ class ProgressStore:
             self._save_locked()
         return True, []
 
+    def completion_map(self, curriculum: Curriculum) -> dict[str, bool]:
+        """Current recursive completion for every lesson in the curriculum.
+
+        Navigation, roadmap locks and the progress counters all used to read
+        the *stored* status, which drifts from the gate: completing A then B,
+        then breaking A's mandatory check, leaves B stored "complete" while
+        the recursive gate rejects anything downstream of it.  The roadmap
+        would then show C unlocked and route the learner into a lesson that
+        cannot be finished, blaming a prerequisite it had just ticked green.
+
+        One evaluation, shared by every caller, so the three views cannot
+        disagree.  This reads recorded outcomes only — no validator re-runs.
+        """
+        with self._lock:
+            return {
+                lesson_id: self._lesson_completion_locked(
+                    curriculum.lessons[lesson_id], curriculum, set()
+                )[0]
+                for lesson_id in curriculum.ordered_lesson_ids
+            }
+
     def lesson_status(self, lesson: Lesson) -> str:
         with self._lock:
             record = self._state["lessons"].get(lesson.id)
@@ -391,21 +430,19 @@ class ProgressStore:
     def resume_lesson_id(self, curriculum: Curriculum) -> str:
         """First available, incomplete lesson in program order.
 
-        Prerequisites are honored: a lesson whose prerequisites are not all
-        complete is skipped, so the learner always lands on actionable work.
+        Prerequisites are honored against the *current* gate outcome, not the
+        stored status, so the learner never lands on a lesson whose
+        prerequisite chain is broken — /api/validate would refuse to complete
+        it and name a prerequisite the roadmap shows as done.
         """
-        with self._lock:
-            lessons_state = dict(self._state["lessons"])
+        complete = self.completion_map(curriculum)
         for lesson_id in curriculum.ordered_lesson_ids:
             lesson = curriculum.lessons[lesson_id]
             if lesson.status == "unavailable":
                 continue
-            if lessons_state.get(lesson_id, {}).get("status") == "complete":
+            if complete.get(lesson_id):
                 continue
-            if all(
-                lessons_state.get(prereq, {}).get("status") == "complete"
-                for prereq in lesson.prerequisites
-            ):
+            if all(complete.get(prereq, False) for prereq in lesson.prerequisites):
                 return lesson_id
         # Everything available is complete: return the last lesson so the
         # UI has somewhere sensible to land.

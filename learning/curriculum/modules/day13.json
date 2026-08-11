@@ -102,15 +102,15 @@
           "id": "verify-shape",
           "validator": "source_check",
           "mandatory": true,
-          "description": "Checks that src/testlab/bench.py defines an annotated BenchLock built on an exclusive-create primitive (O_EXCL, or open mode 'x'). A behavioural probe cannot tell an atomic create from a check-then-write — both look right when run sequentially — so the one property this lesson exists to teach has to be checked in the source.",
+          "description": "Parses acquire() and requires a real exclusive-create call — os.open with O_EXCL, open(path, 'x'), touch(exist_ok=False) or mkdir(). The AST is read, not the text: O_EXCL written in a comment is not the operation, and a sequential probe cannot tell an atomic create from a check-then-write because both look right when nothing else is running.",
           "args": {
             "file": "src/testlab/bench.py",
             "must_contain": [
               "class BenchLock",
               "-> bool",
-              "-> None",
-              "O_EXCL|open\\([^)]*['\"]x"
+              "-> None"
             ],
+            "must_create_exclusively": "acquire",
             "success_note": "src/testlab/bench.py defines an annotated BenchLock — the shape is in place, and it will survive `mypy src simulator learning`."
           }
         },
@@ -125,6 +125,19 @@
             "expect_stdout_regex": "True\\nFalse\\nTrue\\nowner: alice\\ntimestamp: ok\\nFalse\\nTrue\\nFalse",
             "timeout_seconds": 10,
             "success_note": "Exclusive ownership holds even under teardown: bob's release() left alice's lock intact (a non-owner cannot free the bench), and bob only got in after alice released."
+          }
+        },
+        {
+          "type": "verify",
+          "id": "verify-race",
+          "validator": "python_probe",
+          "mandatory": true,
+          "description": "Forces the losing interleaving deterministically: bob holds the bench, then alice's existence check is answered “free” exactly once — the window a real race opens by accident. An exclusive create still refuses, because the kernel decides at creation time; a check-then-write overwrites bob's claim and the bench is now held by two controllers at once. No timing, no retries, no flakiness.",
+          "args": {
+            "snippet": "import json, os, tempfile\nfrom pathlib import Path\nfrom testlab.bench import BenchLock\npath = os.path.join(tempfile.mkdtemp(), 'bench.lock')\nbob = BenchLock(path, 'bob')\nprint('bob_holds=%s' % bob.acquire())\n# A real race is a scheduling accident. This makes it reproducible: the\n# next question 'does the lock file exist?' is answered 'no' exactly once,\n# which is the interleaving where bob took the bench in the window between\n# alice looking and alice writing. An exclusive create still refuses,\n# because the kernel decides at creation time, not at check time.\nreal = (Path.exists, Path.is_file, os.path.exists, os.path.isfile)\nstate = {'lied': False}\ndef lie(fn):\n    def wrapper(target, *a, **k):\n        if not state['lied'] and str(target) == path:\n            state['lied'] = True\n            return False\n        return fn(target, *a, **k)\n    return wrapper\nPath.exists, Path.is_file = lie(real[0]), lie(real[1])\nos.path.exists, os.path.isfile = lie(real[2]), lie(real[3])\ntry:\n    stolen = BenchLock(path, 'alice').acquire()\nfinally:\n    Path.exists, Path.is_file = real[0], real[1]\n    os.path.exists, os.path.isfile = real[2], real[3]\nprint('stolen=%s' % stolen)\nprint('owner=%s' % json.loads(Path(path).read_text(encoding='utf-8'))['owner'])",
+            "expect_stdout_regex": "bob_holds=True\nstolen=False\nowner=bob",
+            "timeout_seconds": 10,
+            "success_note": "acquire() refused even when told the bench was free: the exclusive create failed at the kernel, so bob's claim survived. A check-then-write would have printed stolen=True owner=alice — two controllers on one bench, which on a real bench is two test rigs driving the same hardware."
           }
         },
         {
@@ -174,7 +187,7 @@
         {
           "type": "do",
           "id": "do",
-          "instructions": "Write a run manifest for a real test run. First gather the values:\n\n```git rev-parse HEAD\npython --version\npytest tests/test_status.py -q\n```\n\nThen create `evidence/exercises/manifest.json` (create the directory) with these keys, filled with the real values:\n\n- `commit` — output of `git rev-parse HEAD`\n- `python_version` — e.g. from `python --version`\n- `platform` — e.g. `windows`, from `sys.platform`\n- `pytest_selection` — what you ran, e.g. `\"tests/test_status.py\"`\n- `dut_config` — the DUT settings for the run, e.g. host/port/log file\n- `timestamp` — ISO-8601 UTC of the run\n\nOne-liner for the timestamp: `python -c \"from datetime import datetime, timezone; print(datetime.now(timezone.utc).isoformat())\"`\n\nHint 3 has the skeleton with empty values. (bash: same commands; use forward slashes in paths.)",
+          "instructions": "Write a run manifest for a real test run. First gather the values:\n\n```git rev-parse HEAD\npython --version\npytest tests/test_status.py -q\n```\n\nThen create `evidence/exercises/manifest.json` (create the directory) with these keys, filled with the real values:\n\n- `commit` — output of `git rev-parse HEAD`\n- `python_version` — e.g. from `python --version`\n- `platform` — e.g. `windows`, from `sys.platform`\n- `pytest_selection` — what you ran, e.g. `\"tests/test_status.py\"`\n- `dut_config` — the DUT settings for the run: `host` and `port` are required (they name the listener the run talked to), plus anything else that mattered, e.g. the log file\n- `timestamp` — ISO-8601 UTC of the run\n\nOne-liner for the timestamp: `python -c \"from datetime import datetime, timezone; print(datetime.now(timezone.utc).isoformat())\"`\n\nHint 3 has the skeleton with empty values. (bash: same commands; use forward slashes in paths.)",
           "command": "git rev-parse HEAD"
         },
         {
@@ -182,7 +195,7 @@
           "id": "verify",
           "validator": "artifact_check",
           "mandatory": true,
-          "description": "Checks that all six configuration-identity fields are actually filled in — a real commit id, a parseable ISO-8601 timestamp, and a DUT configuration with no placeholder values. An empty skeleton does not pass.",
+          "description": "Checks that all six configuration-identity fields are actually filled in — a real commit id, a parseable ISO-8601 timestamp, and a DUT configuration that names the host and port the run actually used. An empty skeleton does not pass, and neither does {\"host\": null} or a port left at the skeleton's 0 — both look filled in to an is-it-empty test and identify no listener.",
           "args": {
             "file": "evidence/exercises/manifest.json",
             "json_fields": {
@@ -190,7 +203,7 @@
               "python_version": "^\\d+\\.\\d+",
               "platform": "string",
               "pytest_selection": "string",
-              "dut_config": "object",
+              "dut_config": { "object": { "host": "string", "port": "port" } },
               "timestamp": "timestamp"
             },
             "success_note": "Manifest complete: a real commit, interpreter version, platform, selection, DUT config and timestamp — this run can actually be reproduced, not just described."

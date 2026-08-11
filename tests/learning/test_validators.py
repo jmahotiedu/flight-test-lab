@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import json
+import os
+import re
 import socket
 import subprocess
+import sys
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -603,3 +606,277 @@ def test_behavior_probe_structured_failure_is_truthful() -> None:
 def test_unknown_validator_rejected() -> None:
     with pytest.raises(KeyError, match="unknown validator"):
         run_validator("arbitrary_shell", {"command": "echo hi"}, CONTEXT)
+
+
+def _process_alive(pid: int) -> bool:
+    if sys.platform == "win32":
+        listing = subprocess.run(
+            ["tasklist", "/FI", f"PID eq {pid}", "/NH"],
+            capture_output=True,
+            text=True,
+            check=False,
+        ).stdout
+        return str(pid) in listing
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def test_the_clean_lifecycle_probe_reaps_when_its_middle_raises() -> None:
+    """A failing validator must not also leak the DUT it spawned.
+
+    run_subprocess kills the process group on timeout, not on an ordinary
+    nonzero exit, so the snippet is the only thing that knows the pid. This
+    runs the *shipped* Day 6 snippet with readiness forced to raise — what a
+    learner-broken LabClient does — and checks the DUT is gone anyway.
+    """
+    from learning.server.curriculum import load_curriculum
+    from learning.server.validators import validator_names
+
+    curriculum = load_curriculum(REPO_ROOT / "learning", validator_names())
+    lesson = curriculum.lessons["d6-broken-cleanup-sandbox"]
+    block = next(b for b in lesson.blocks if b["id"] == "v-clean")
+
+    snippet = block["args"]["snippet"]
+    assert "finally:" in snippet
+    # Announce the pid, then break the same call a broken client would break.
+    snippet = snippet.replace(
+        "try:\n", "print('PID=%d' % p.pid, flush=True)\ntry:\n", 1
+    )
+    snippet = snippet.replace(
+        "    c.wait_until_ready(deadline_seconds=5.0)",
+        "    raise RuntimeError('readiness failed')",
+        1,
+    )
+    assert "RuntimeError" in snippet
+
+    result = run_validator(
+        "python_probe",
+        {"snippet": snippet, "expect_stdout_regex": "PID=", "timeout_seconds": 30},
+        CONTEXT,
+    )
+    match = re.search(r"PID=(\d+)", result.stdout)
+    assert match, result.stdout
+    assert not result.passed, "the injected failure must be reported, not hidden"
+    assert not _process_alive(int(match.group(1))), (
+        "the DUT outlived the failing validator"
+    )
+
+
+RACY_LOCK = '''"""A check-then-write lock that mentions the right primitive."""
+from __future__ import annotations
+
+import json
+import os
+from datetime import UTC, datetime
+from pathlib import Path
+
+
+class BenchLock:
+    def __init__(self, path: str, owner: str) -> None:
+        self.path = Path(path)
+        self.owner = owner
+        self._held = False
+
+    def acquire(self) -> bool:
+        # TODO: ought to use os.O_EXCL here; open(p, "x") would work too
+        if self.path.exists():
+            return False
+        self.path.write_text(
+            json.dumps(
+                {"owner": self.owner, "timestamp": datetime.now(UTC).isoformat()}
+            ),
+            encoding="utf-8",
+        )
+        self._held = True
+        return True
+
+    def release(self) -> None:
+        if self._held and self.path.exists():
+            os.unlink(self.path)
+            self._held = False
+
+    def is_locked(self) -> bool:
+        return self.path.exists()
+'''
+
+EXCLUSIVE_LOCK = RACY_LOCK.replace(
+    """        # TODO: ought to use os.O_EXCL here; open(p, "x") would work too
+        if self.path.exists():
+            return False
+        self.path.write_text(
+            json.dumps(
+                {"owner": self.owner, "timestamp": datetime.now(UTC).isoformat()}
+            ),
+            encoding="utf-8",
+        )""",
+    """        try:
+            handle = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            return False
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            json.dump(
+                {"owner": self.owner, "timestamp": datetime.now(UTC).isoformat()},
+                stream,
+            )""",
+)
+
+DAY13_SHAPE_GATE = {
+    "must_contain": ["class BenchLock", "-> bool", "-> None"],
+    "must_create_exclusively": "acquire",
+}
+
+
+@pytest.fixture()
+def bench_module() -> Iterator[Path]:
+    """A scratch module inside the repo (source paths may not escape it)."""
+    target = REPO_ROOT / "src" / "testlab" / "bench_under_test.py"
+    try:
+        yield target
+    finally:
+        target.unlink(missing_ok=True)
+
+
+def _shape_gate(bench_module: Path) -> dict[str, object]:
+    return {
+        "file": str(bench_module.relative_to(REPO_ROOT).as_posix()),
+        **DAY13_SHAPE_GATE,
+    }
+
+
+@pytest.mark.parametrize(
+    ("label", "source", "expected"),
+    [("racy", RACY_LOCK, False), ("exclusive", EXCLUSIVE_LOCK, True)],
+)
+def test_exclusive_create_is_read_from_the_ast_not_the_text(
+    bench_module: Path, label: str, source: str, expected: bool
+) -> None:
+    """O_EXCL in a comment is not an exclusive create.
+
+    Both sources contain the identifiers a regex would look for, and both
+    behave identically when probed sequentially — the race window is invisible
+    without contention, which is the whole reason this property is checked in
+    the parsed source rather than the file text.
+    """
+    bench_module.write_text(source, encoding="utf-8")
+    result = run_validator("source_check", _shape_gate(bench_module), CONTEXT)
+    assert result.passed is expected, result.interpretation
+    if not expected:
+        assert "exclusive-create" in result.interpretation
+
+
+ACQUIRE_BODIES = {
+    "open-x-mode": (
+        "        try:\n"
+        "            handle = open(self.path, 'x', encoding='utf-8')\n"
+        "        except FileExistsError:\n"
+        "            return False\n"
+        "        handle.write('{}')\n"
+        "        handle.close()\n"
+        "        return True"
+    ),
+    "touch-exist-ok": (
+        "        try:\n"
+        "            self.path.touch(exist_ok=False)\n"
+        "        except FileExistsError:\n"
+        "            return False\n"
+        "        return True"
+    ),
+    "mkdir": (
+        "        try:\n"
+        "            self.path.mkdir()\n"
+        "        except FileExistsError:\n"
+        "            return False\n"
+        "        return True"
+    ),
+}
+
+
+@pytest.mark.parametrize("idiom", sorted(ACQUIRE_BODIES))
+def test_other_exclusive_create_idioms_are_accepted(
+    bench_module: Path, idiom: str
+) -> None:
+    """The gate must not force one spelling of "create or fail"."""
+    bench_module.write_text(
+        "from __future__ import annotations\n"
+        "from pathlib import Path\n\n\n"
+        "class BenchLock:\n"
+        "    def __init__(self, path: str, owner: str) -> None:\n"
+        "        self.path = Path(path)\n"
+        "        self._held = False\n\n"
+        "    def acquire(self) -> bool:\n" + ACQUIRE_BODIES[idiom] + "\n\n"
+        "    def release(self) -> None:\n"
+        "        self._held = False\n",
+        encoding="utf-8",
+    )
+    result = run_validator("source_check", _shape_gate(bench_module), CONTEXT)
+    assert result.passed, result.interpretation
+
+
+DUT_CONFIG_SPEC = {"dut_config": {"object": {"host": "string", "port": "port"}}}
+
+
+@pytest.mark.parametrize(
+    ("label", "config", "expected"),
+    [
+        # Every one of these is non-empty with no blank strings — and records
+        # nothing a run could be reproduced from.
+        ("placeholder key", {"placeholder": None}, "is missing 'host'"),
+        ("null host", {"host": None, "port": 9000}, "'dut_config.host' is empty"),
+        ("skeleton port", {"host": "127.0.0.1", "port": 0}, "not a usable port"),
+        ("string port", {"host": "127.0.0.1", "port": "9000"}, "must be a port number"),
+        ("missing port", {"host": "127.0.0.1"}, "is missing 'port'"),
+        ("blank host", {"host": "  ", "port": 9000}, "empty placeholder values"),
+    ],
+)
+def test_dut_config_keys_are_validated_individually(
+    tmp_path: Path, label: str, config: dict[str, object], expected: str
+) -> None:
+    """A non-empty object is not a configuration.
+
+    The port case matters most: the taught skeleton's placeholder is the
+    number 0, which looks filled in to any is-it-empty test and names no
+    listener.
+    """
+    path = tmp_path / "manifest.json"
+    path.write_text(json.dumps({"dut_config": config}), encoding="utf-8")
+    result = run_validator(
+        "artifact_check",
+        {"file": str(path), "json_fields": DUT_CONFIG_SPEC},
+        ValidatorContext(repo_root=tmp_path),
+    )
+    assert not result.passed
+    assert expected in result.interpretation
+
+
+def test_a_real_dut_config_still_passes(tmp_path: Path) -> None:
+    """Unnamed keys stay optional and may be null.
+
+    exit_after_requests: null is a real setting meaning "no such fault", not
+    an unfilled blank — rejecting it would fail a learner who wrote down the
+    actual configuration.
+    """
+    path = tmp_path / "manifest.json"
+    path.write_text(
+        json.dumps(
+            {
+                "dut_config": {
+                    "host": "127.0.0.1",
+                    "port": 9000,
+                    "log_file": "evidence/logs/dut.log",
+                    "exit_after_requests": None,
+                    "drop_connection": False,
+                    "startup_delay_ms": 0,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    result = run_validator(
+        "artifact_check",
+        {"file": str(path), "json_fields": DUT_CONFIG_SPEC},
+        ValidatorContext(repo_root=tmp_path),
+    )
+    assert result.passed, result.interpretation

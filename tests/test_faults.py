@@ -237,6 +237,23 @@ def test_fault_config_rejects_wrong_types(
 
 
 @pytest.mark.requirement("REQ-FAULT-001")
+def test_fault_config_with_a_bad_encoding_is_a_cli_error(tmp_path: Path) -> None:
+    """An unreadable config is a usage error, not a traceback.
+
+    UnicodeDecodeError is a ValueError, so it is caught by neither the OSError
+    nor the JSONDecodeError arm — a config saved in the wrong encoding used to
+    end the run with a stack trace while every other malformed file got a
+    one-line diagnostic.
+    """
+    from simulator.simulator import load_fault_config
+
+    path = tmp_path / "fault.json"
+    path.write_bytes(b'{"drop_connection": true, "note": "\xff\xfe"}')
+    with pytest.raises(SystemExit, match="--fault-config: cannot read"):
+        load_fault_config(path)
+
+
+@pytest.mark.requirement("REQ-FAULT-001")
 def test_valid_fault_config_still_loads(tmp_path: Path) -> None:
     from simulator.simulator import load_fault_config
 

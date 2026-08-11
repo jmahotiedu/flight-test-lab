@@ -83,6 +83,12 @@ def test_structurally_invalid_state_is_backed_up_and_reset(
         '{"version": 1, "lessons": {"l1": {"steps_done": "not-a-list"}}}',
         '{"version": 1, "lessons": {"l1": {"validations": {"v": "nope"}}}}',
         '{"version": 1, "interview": {"q1": {"correct": null, "incorrect": []}}}',
+        # "false" is a non-empty string, so a truthiness test reads it as a
+        # pass: a damaged file would satisfy a mandatory validator and certify
+        # the lesson instead of taking the recovery path.
+        '{"version": 1, "lessons": {"l": {"validations": {"v": {"passed": "false"}}}}}',
+        '{"version": 1, "lessons": {"l1": {"validations": {"v": {"passed": 1}}}}}',
+        '{"version": 1, "lessons": {"l1": {"validations": {"v": {"at": 17}}}}}',
     ],
 )
 def test_records_with_wrong_field_types_are_reset(tmp_path: Path, payload: str) -> None:
@@ -317,6 +323,92 @@ def test_a_broken_prerequisite_invalidates_completed_dependents(
     complete, missing = store.lesson_completion(last, curriculum)
     assert not complete
     assert any("prerequisite" in reason for reason in missing)
+
+
+def test_a_non_boolean_pass_cannot_certify_a_lesson(tmp_path: Path) -> None:
+    """Only a real boolean counts as a passed mandatory validation.
+
+    The loader rejects the file, and the gate is the second lock on the same
+    door: if a damaged record ever reached it, `"false"` must not read as a
+    pass just because a non-empty string is truthy.
+    """
+    curriculum = load_curriculum(LEARNING_ROOT, validator_names())
+    lesson = curriculum.lessons["d1-import-no-side-effects"]
+    store = ProgressStore(tmp_path / "progress.json")
+    for block_id in lesson.required_quiz_ids():
+        store.record_quiz(lesson.id, block_id, True, lesson.concepts)
+    for block_id in lesson.required_explain_ids():
+        store.record_explain(lesson.id, block_id, True, lesson.concepts)
+    for block in lesson.mandatory_validators():
+        store.record_validation(lesson.id, block["id"], True)
+    assert store.lesson_completion(lesson, curriculum)[0]
+
+    # Reach past the API the way a hand-edited file would.
+    snapshot = store.snapshot()
+    for outcome in snapshot["lessons"][lesson.id]["validations"].values():
+        outcome["passed"] = "false"
+    store._state = snapshot  # noqa: SLF001 - simulating a damaged record
+
+    complete, missing = store.lesson_completion(lesson, curriculum)
+    assert not complete
+    assert any("mandatory validation" in reason for reason in missing)
+
+
+def test_a_bad_encoding_takes_the_reset_path(tmp_path: Path) -> None:
+    """A truncated multi-byte sequence is corruption, not a crash.
+
+    UnicodeDecodeError is neither an OSError nor a JSONDecodeError, so the
+    shape a crash mid-write leaves behind used to take down the server at
+    startup instead of being backed up and reset.
+    """
+    path = tmp_path / "progress.json"
+    path.write_bytes(b'{"version": 1, "lessons": {"l1": {"status": "compl\xff')
+
+    store = ProgressStore(path)
+
+    assert store.snapshot()["lessons"] == {}
+    assert path.with_suffix(".corrupt.json").exists()
+
+
+def test_navigation_and_counts_follow_the_recursive_gate(tmp_path: Path) -> None:
+    """The roadmap, the counters and the gate must agree.
+
+    Completing A then B and then breaking A leaves B stored "complete".
+    Reading the stored status showed C unlocked and counted B as done, while
+    the recursive gate refused to complete C and blamed the prerequisite the
+    roadmap had just ticked green.
+    """
+    curriculum = load_curriculum(LEARNING_ROOT, validator_names())
+    chain = ["d1-import-no-side-effects", "d1-main-entrypoint", "d1-argparse-logging"]
+    store = ProgressStore(tmp_path / "progress.json")
+
+    for lesson_id in chain[:2]:
+        lesson = curriculum.lessons[lesson_id]
+        for block in lesson.mandatory_validators():
+            store.record_validation(lesson.id, block["id"], True)
+        for block_id in lesson.required_quiz_ids():
+            store.record_quiz(lesson.id, block_id, True, lesson.concepts)
+        for block_id in lesson.required_explain_ids():
+            store.record_explain(lesson.id, block_id, True, lesson.concepts)
+        assert store.mark_complete(lesson, curriculum)[0]
+
+    assert store.completion_map(curriculum)[chain[1]] is True
+
+    first = curriculum.lessons[chain[0]]
+    store.record_validation(first.id, first.mandatory_validators()[0]["id"], False)
+
+    complete = store.completion_map(curriculum)
+    # B is still stored "complete" — that is exactly the drift being guarded.
+    assert store.snapshot()["lessons"][chain[1]]["status"] == "complete"
+    assert complete[chain[0]] is False
+    assert complete[chain[1]] is False, "B cannot stand on a broken A"
+
+    last = curriculum.lessons[chain[2]]
+    assert not all(complete.get(p, False) for p in last.prerequisites), (
+        "the roadmap would show C unlocked while /api/complete refuses it"
+    )
+    assert store.resume_lesson_id(curriculum) == chain[0]
+    assert sum(1 for done in complete.values() if done) == 0
 
 
 def test_progress_file_is_written_atomically(tmp_path: Path) -> None:

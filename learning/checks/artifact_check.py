@@ -61,6 +61,144 @@ def _commit_exists(repo_root: Path, commit: str) -> bool:
     return result.returncode == 0
 
 
+def _check_object(
+    relative: str,
+    label: str,
+    value: Any,
+    required: dict[str, Any],
+    repo_root: Path,
+) -> list[str]:
+    """Check a nested object: non-empty, no placeholders, required keys valid.
+
+    A bare non-empty object is not a configuration.  ``{"placeholder": null}``
+    and ``{"host": null}`` both satisfy "non-empty, no blank strings" while
+    recording nothing a run could be reproduced from, so the keys that matter
+    are named in the spec and validated individually.  Keys *not* named stay
+    optional and may be null — ``exit_after_requests: null`` is a real setting
+    meaning "no such fault", not an unfilled blank.
+    """
+    if not isinstance(value, dict) or not value:
+        return [f"{relative}: {label!r} must be a non-empty object"]
+
+    failures: list[str] = []
+    # Only an empty string is a placeholder. `false`, `0` and `null` are
+    # legitimate settings — a nominal run genuinely records
+    # drop_connection: false and startup_delay_ms: 0 — and rejecting them
+    # would fail a learner who wrote down the real configuration. (Note
+    # `False == 0` in Python, so a membership test against 0 would have
+    # swept up every disabled boolean too.)
+    if any(isinstance(v, str) and not v.strip() for v in value.values()):
+        failures.append(
+            f"{relative}: {label!r} still has empty placeholder values "
+            f"({_describe(value)}) — fill in the real configuration"
+        )
+    for key, rule in required.items():
+        if key not in value:
+            failures.append(
+                f"{relative}: {label!r} is missing {key!r} — a configuration "
+                "that omits it cannot be reproduced from this manifest"
+            )
+            continue
+        failures.extend(
+            _check_scalar(relative, f"{label}.{key}", value[key], rule, repo_root)
+        )
+    return failures
+
+
+def _check_scalar(
+    relative: str,
+    label: str,
+    value: Any,
+    rule: Any,
+    repo_root: Path,
+) -> list[str]:
+    """Validate one value against one rule.  Returns the failures it found."""
+    failures: list[str] = []
+
+    if isinstance(rule, dict):
+        return _check_object(
+            relative, label, value, rule.get("object") or {}, repo_root
+        )
+
+    if rule == "object":
+        return _check_object(relative, label, value, {}, repo_root)
+
+    if rule == "port":
+        # A port is the one field where the taught skeleton's placeholder is a
+        # number: `"port": 0` looks filled in to any is-it-empty test and
+        # names no listener.
+        if isinstance(value, bool) or not isinstance(value, int):
+            failures.append(
+                f"{relative}: {label!r} must be a port number, got {_describe(value)}"
+            )
+        elif not 1 <= value <= 65535:
+            failures.append(
+                f"{relative}: {label!r} is not a usable port ({_describe(value)}) — "
+                "the skeleton's 0 has to be replaced with the port the run used"
+            )
+        return failures
+
+    if rule == "integer":
+        if isinstance(value, bool) or not isinstance(value, int):
+            failures.append(
+                f"{relative}: {label!r} must be an integer, got {_describe(value)}"
+            )
+        return failures
+
+    if not isinstance(value, str) or not value.strip():
+        return [
+            f"{relative}: {label!r} is empty — the skeleton has to be "
+            f"filled in with the real value, got {_describe(value)}"
+        ]
+
+    if rule == "commit":
+        if not re.fullmatch(r"[0-9a-fA-F]{7,40}", value.strip()):
+            failures.append(
+                f"{relative}: {label!r} is not a git commit id "
+                f"({_describe(value)}); use the output of `git rev-parse HEAD`"
+            )
+        elif not _commit_exists(repo_root, value.strip()):
+            failures.append(
+                f"{relative}: {label!r} ({_describe(value)}) is not a commit "
+                "in this repository — a manifest has to identify the state "
+                "that produced the run, not just look like a hash"
+            )
+    elif rule == "timestamp":
+        # Parseability is not identity: fromisoformat also accepts a bare
+        # date and a naive local datetime, neither of which names an
+        # unambiguous instant. A run manifest compared across machines
+        # needs a time *and* an offset.
+        text = value.strip().replace("Z", "+00:00")
+        try:
+            parsed = datetime.fromisoformat(text)
+        except ValueError:
+            failures.append(
+                f"{relative}: {label!r} is not an ISO-8601 timestamp "
+                f"({_describe(value)})"
+            )
+        else:
+            if "T" not in text and " " not in text:
+                failures.append(
+                    f"{relative}: {label!r} is a date with no time of day "
+                    f"({_describe(value)}) — a run happens at an instant"
+                )
+            elif parsed.tzinfo is None:
+                failures.append(
+                    f"{relative}: {label!r} has no UTC offset "
+                    f"({_describe(value)}) — a local time means nothing on "
+                    "another machine; use datetime.now(UTC).isoformat()"
+                )
+    elif (
+        isinstance(rule, str)
+        and rule not in ("string", "commit", "timestamp")
+        and not re.search(rule, value)
+    ):
+        failures.append(
+            f"{relative}: {label!r} does not match /{rule}/ ({_describe(value)})"
+        )
+    return failures
+
+
 def _check_json_fields(
     relative: str,
     document: dict[str, Any],
@@ -69,85 +207,20 @@ def _check_json_fields(
 ) -> list[str]:
     """Require each named field to be present, correctly typed and filled in.
 
-    Spec values are rules: "string" (non-empty), "object" (non-empty),
-    "commit" (40 hex characters), "timestamp" (ISO-8601 parseable), or a regex
-    string the value must match.
+    Spec values are rules: "string" (non-empty), "integer", "port",
+    "commit" (hex that names a real commit), "timestamp" (ISO-8601 with an
+    offset), a regex string the value must match, "object" (non-empty, no
+    blank placeholders), or ``{"object": {<key>: <rule>}}`` to additionally
+    require and validate named keys inside that object.
     """
     failures: list[str] = []
     for field, rule in spec.items():
         if field not in document:
             failures.append(f"{relative} is missing {field!r}")
             continue
-        value = document[field]
-
-        if rule == "object":
-            if not isinstance(value, dict) or not value:
-                failures.append(f"{relative}: {field!r} must be a non-empty object")
-            # Only an empty string is a placeholder. `false`, `0` and `null`
-            # are legitimate settings — a nominal run genuinely records
-            # drop_connection: false and startup_delay_ms: 0 — and rejecting
-            # them would fail a learner who wrote down the real configuration.
-            # (Note `False == 0` in Python, so a membership test against 0
-            # would have swept up every disabled boolean too.)
-            elif any(isinstance(v, str) and not v.strip() for v in value.values()):
-                failures.append(
-                    f"{relative}: {field!r} still has empty placeholder values "
-                    f"({_describe(value)}) — fill in the real configuration"
-                )
-            continue
-
-        if not isinstance(value, str) or not value.strip():
-            failures.append(
-                f"{relative}: {field!r} is empty — the skeleton has to be "
-                f"filled in with the real value, got {_describe(value)}"
-            )
-            continue
-
-        if rule == "commit":
-            if not re.fullmatch(r"[0-9a-fA-F]{7,40}", value.strip()):
-                failures.append(
-                    f"{relative}: {field!r} is not a git commit id "
-                    f"({_describe(value)}); use the output of `git rev-parse HEAD`"
-                )
-            elif not _commit_exists(repo_root, value.strip()):
-                failures.append(
-                    f"{relative}: {field!r} ({_describe(value)}) is not a commit "
-                    "in this repository — a manifest has to identify the state "
-                    "that produced the run, not just look like a hash"
-                )
-        elif rule == "timestamp":
-            # Parseability is not identity: fromisoformat also accepts a bare
-            # date and a naive local datetime, neither of which names an
-            # unambiguous instant. A run manifest compared across machines
-            # needs a time *and* an offset.
-            text = value.strip().replace("Z", "+00:00")
-            try:
-                parsed = datetime.fromisoformat(text)
-            except ValueError:
-                failures.append(
-                    f"{relative}: {field!r} is not an ISO-8601 timestamp "
-                    f"({_describe(value)})"
-                )
-            else:
-                if "T" not in text and " " not in text:
-                    failures.append(
-                        f"{relative}: {field!r} is a date with no time of day "
-                        f"({_describe(value)}) — a run happens at an instant"
-                    )
-                elif parsed.tzinfo is None:
-                    failures.append(
-                        f"{relative}: {field!r} has no UTC offset "
-                        f"({_describe(value)}) — a local time means nothing on "
-                        "another machine; use datetime.now(UTC).isoformat()"
-                    )
-        elif (
-            isinstance(rule, str)
-            and rule not in ("string", "commit", "timestamp")
-            and not re.search(rule, value)
-        ):
-            failures.append(
-                f"{relative}: {field!r} does not match /{rule}/ ({_describe(value)})"
-            )
+        failures.extend(
+            _check_scalar(relative, field, document[field], rule, repo_root)
+        )
     return failures
 
 

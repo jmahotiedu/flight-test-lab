@@ -63,7 +63,11 @@ def load_fault_config(path: Path) -> FaultConfig:
     """Load a fault configuration from a JSON file."""
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+    # UnicodeDecodeError is a ValueError, not an OSError, and json never sees
+    # the file when decoding fails — so without UnicodeError here a config
+    # saved in the wrong encoding ends the run with a traceback instead of the
+    # same one-line diagnostic every other malformed config gets.
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise SystemExit(f"--fault-config: cannot read {path}: {exc}") from exc
     if not isinstance(data, dict):
         raise SystemExit("--fault-config must contain a JSON object")

@@ -228,8 +228,10 @@ class LearningHandler(BaseHTTPRequestHandler):
         curriculum = self.server.curriculum
         progress = self.server.progress
         resume_id = progress.resume_lesson_id(curriculum)
-        snapshot = progress.snapshot()
-        lessons_state = snapshot["lessons"]
+        # Counted from the same recursive gate that decides completion, not
+        # from stored statuses: a lesson whose prerequisite chain has since
+        # broken must not keep contributing to "12 of 41 done".
+        complete = progress.completion_map(curriculum)
         total_available = sum(
             1 for lesson in curriculum.lessons.values() if lesson.status == "available"
         )
@@ -237,7 +239,7 @@ class LearningHandler(BaseHTTPRequestHandler):
             1
             for lesson_id in curriculum.ordered_lesson_ids
             if curriculum.lessons[lesson_id].status == "available"
-            and lessons_state.get(lesson_id, {}).get("status") == "complete"
+            and complete.get(lesson_id)
         )
         day_progress = []
         for day in curriculum.days:
@@ -246,11 +248,7 @@ class LearningHandler(BaseHTTPRequestHandler):
                 for lid in day.lesson_ids
                 if curriculum.lessons[lid].status == "available"
             ]
-            done = [
-                lid
-                for lid in available
-                if lessons_state.get(lid, {}).get("status") == "complete"
-            ]
+            done = [lid for lid in available if complete.get(lid)]
             day_progress.append(
                 {
                     "day": day.day,
@@ -275,16 +273,16 @@ class LearningHandler(BaseHTTPRequestHandler):
         progress = self.server.progress
         snapshot = progress.snapshot()
         lessons_state = snapshot["lessons"]
+        # Locks come from the recursive gate, so the roadmap cannot show a
+        # lesson as unlocked that /api/validate would then refuse to complete.
+        complete = progress.completion_map(curriculum)
         days = []
         for day in curriculum.days:
             lessons = []
             for lesson_id in day.lesson_ids:
                 lesson = curriculum.lessons[lesson_id]
                 record = lessons_state.get(lesson_id, {})
-                prereqs_met = all(
-                    lessons_state.get(p, {}).get("status") == "complete"
-                    for p in lesson.prerequisites
-                )
+                prereqs_met = all(complete.get(p, False) for p in lesson.prerequisites)
                 lessons.append(
                     {
                         "id": lesson.id,
@@ -292,7 +290,16 @@ class LearningHandler(BaseHTTPRequestHandler):
                         "estimated_minutes": lesson.estimated_minutes,
                         "status": lesson.status,
                         "unavailable_reason": lesson.unavailable_reason,
-                        "progress": record.get("status", "not_started"),
+                        # A lesson stored "complete" whose chain has since
+                        # broken must not stay green while it locks the next
+                        # one — that reads as a roadmap bug rather than as
+                        # "go back and fix this".
+                        "progress": (
+                            record.get("status", "not_started")
+                            if complete.get(lesson_id, False)
+                            or record.get("status") != "complete"
+                            else "in_progress"
+                        ),
                         "locked": lesson.status == "available" and not prereqs_met,
                     }
                 )

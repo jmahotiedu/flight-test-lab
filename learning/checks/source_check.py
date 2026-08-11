@@ -66,6 +66,71 @@ def _marked_functions(tree: ast.AST, requirement: str) -> list[str]:
     return marked
 
 
+def _creates_exclusively(node: ast.AST) -> bool:
+    """Does this call create a file in a way that fails if it already exists?
+
+    The forms that are genuinely atomic against a concurrent contender:
+
+    * ``os.open(..., os.O_CREAT | os.O_EXCL)``
+    * ``open(path, "x")`` / ``Path(...).open("x")`` — any mode containing "x"
+    * ``Path(...).touch(exist_ok=False)``
+    * ``Path(...).mkdir()`` / ``os.mkdir(...)`` without ``exist_ok=True``
+    * ``os.link`` / ``os.symlink`` — the classic NFS-safe lock primitives
+    """
+    if not isinstance(node, ast.Call):
+        return False
+    target = node.func
+    name = (
+        target.attr if isinstance(target, ast.Attribute) else getattr(target, "id", "")
+    )
+
+    if name == "open":
+        # os.open's flags are the 2nd argument; builtin open's mode is too.
+        if any(
+            isinstance(inner, ast.Attribute | ast.Name)
+            and (getattr(inner, "attr", None) or getattr(inner, "id", None)) == "O_EXCL"
+            for argument in node.args[1:]
+            for inner in ast.walk(argument)
+        ):
+            return True
+        modes = [node.args[1]] if len(node.args) > 1 else []
+        modes += [kw.value for kw in node.keywords if kw.arg in ("mode", "flags")]
+        return any(
+            isinstance(mode, ast.Constant)
+            and isinstance(mode.value, str)
+            and "x" in mode.value
+            for mode in modes
+        )
+
+    if name == "touch":
+        return any(
+            kw.arg == "exist_ok"
+            and isinstance(kw.value, ast.Constant)
+            and kw.value.value is False
+            for kw in node.keywords
+        )
+
+    if name == "mkdir":
+        # exist_ok defaults to False, so a bare mkdir is already exclusive;
+        # only an explicit exist_ok=True gives the lock away.
+        return not any(
+            kw.arg == "exist_ok"
+            and isinstance(kw.value, ast.Constant)
+            and kw.value.value is True
+            for kw in node.keywords
+        )
+
+    return name in ("link", "symlink")
+
+
+def _function_named(tree: ast.AST, name: str) -> ast.AST | None:
+    functions = (ast.FunctionDef, ast.AsyncFunctionDef)
+    for node in ast.walk(tree):
+        if isinstance(node, functions) and node.name == name:
+            return node
+    return None
+
+
 def run(args: dict[str, Any], context: ValidatorContext) -> CheckResult:
     relative = args.get("file")
     if not isinstance(relative, str) or not relative:
@@ -105,6 +170,30 @@ def run(args: dict[str, Any], context: ValidatorContext) -> CheckResult:
             if function_name not in defined:
                 failures.append(
                     f"{relative} does not define a function named {function_name!r}"
+                )
+
+    exclusive_function = args.get("must_create_exclusively")
+    if isinstance(exclusive_function, str) and text:
+        # Searching the text for "O_EXCL" accepts it in a comment — the very
+        # failure mode _marked_functions was written to avoid, repeated for a
+        # property no sequential probe can observe. Parse the named function
+        # and look for a call that actually creates the file exclusively.
+        try:
+            tree = ast.parse(text)
+        except SyntaxError as exc:
+            failures.append(f"{relative} does not parse as Python: {exc}")
+        else:
+            function = _function_named(tree, exclusive_function)
+            if function is None:
+                failures.append(f"{relative} does not define {exclusive_function!r}")
+            elif not any(_creates_exclusively(node) for node in ast.walk(function)):
+                failures.append(
+                    f"{relative}: {exclusive_function}() never creates the lock "
+                    "file with an exclusive-create operation — os.open(..., "
+                    "os.O_CREAT | os.O_EXCL), open(path, 'x'), "
+                    "touch(exist_ok=False) or mkdir() all fail when the file "
+                    "already exists, and a check-then-write does not. The "
+                    "identifier appearing in a comment is not the operation"
                 )
 
     marker_requirement = args.get("must_have_requirement_marker")
