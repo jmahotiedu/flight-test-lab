@@ -18,7 +18,15 @@ import time
 from pathlib import Path
 from typing import Any
 
-from learning.checks.common import reserve_port, run_subprocess
+from learning.checks.common import (
+    CREATION_FLAGS,
+    START_NEW_SESSION,
+    kill_process_tree,
+    register_child,
+    reserve_port,
+    run_subprocess,
+    unregister_child,
+)
 from learning.server.toolchain import cached_toolchain
 from learning.server.validators import (
     CheckResult,
@@ -194,7 +202,13 @@ def _run_gdb_attach(
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         text=True,
+        creationflags=CREATION_FLAGS,
+        start_new_session=START_NEW_SESSION,
     )
+    # Tracked for shutdown: this DUT is deliberately wedged, so if Ctrl+C
+    # abandons the daemon handler thread before its finally runs, nothing else
+    # would ever reap it.
+    register_child(process)
     try:
         deadline = time.monotonic() + min(15.0, timeout)
         connected = False
@@ -223,9 +237,10 @@ def _run_gdb_attach(
             argv, timeout=timeout, cwd=context.repo_root
         )
     finally:
-        process.kill()
+        kill_process_tree(process)
         with contextlib.suppress(subprocess.TimeoutExpired):
             process.wait(timeout=10)
+        unregister_child(process)
 
     duration_ms = int((time.monotonic() - started) * 1000)
     return _evaluate(

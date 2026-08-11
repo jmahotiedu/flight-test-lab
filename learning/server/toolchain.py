@@ -84,14 +84,12 @@ class Toolchain:
     def can_build_cpp(self) -> bool:
         if not (self.cmake and self.ctest and self.cxx):
             return False
-        # On Windows a generator is not optional. Without Ninja or a make,
-        # CMake falls back to Visual Studio even though the detected compiler
-        # is g++ — producing a build the debugger lessons cannot use and a
-        # cache the next check has to reject. Unlocking the module in that
-        # state would offer a lesson whose mandatory path cannot succeed.
-        if sys.platform == "win32":
-            return bool(self.ninja or self.make)
-        return True
+        # A build backend is required everywhere, not just on Windows.
+        # CMake's default generator on Unix is "Unix Makefiles", which still
+        # needs an external make; on Windows it is Visual Studio, which the
+        # debugger lessons cannot use. Either way, unlocking the module
+        # without one offers a lesson whose mandatory build cannot run.
+        return bool(self.ninja or self.make)
 
     @property
     def can_debug(self) -> bool:
@@ -116,8 +114,8 @@ class Toolchain:
                 )
                 if not path
             ]
-            if sys.platform == "win32" and not (self.ninja or self.make):
-                absent.append("a generator (ninja, or mingw32-make)")
+            if not (self.ninja or self.make):
+                absent.append("a build backend (ninja, or make/mingw32-make)")
             return absent
         if requirement == "gdb":
             return [] if self.gdb else ["gdb"]

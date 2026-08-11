@@ -320,6 +320,12 @@ def load_curriculum(
             )
         )
 
+    if not ordered:
+        # An all-empty program loads fine and then makes the first
+        # /api/state raise IndexError inside resume_lesson_id, which is the
+        # runtime discovery the loader exists to prevent.
+        _fail(program_path, "the curriculum defines no lessons at all")
+
     # Prerequisites must resolve *and* point backwards.  A forward or circular
     # dependency leaves that lesson permanently locked in the roadmap and
     # skipped by resume, which is a curriculum defect the learner would

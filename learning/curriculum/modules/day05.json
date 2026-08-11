@@ -207,8 +207,8 @@
           "args": {
             "nodeids": ["tests/test_build_response.py"],
             "expect": "pass",
-            "junit_contains": ["test_build_response"],
-            "success_note": "All parametrized cases passed and each was recorded as its own JUnit testcase — the error matrix is now executable evidence for REQ-PROTO-001."
+            "junit_contains": ["list-input", "missing-command", "unsupported-command"],
+            "success_note": "All three parametrized cases passed and each was recorded as its own JUnit testcase, under the id you gave it — the error matrix is executable evidence for REQ-PROTO-001, not one test with a plural name."
           }
         },
         {

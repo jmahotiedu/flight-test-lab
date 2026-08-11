@@ -77,6 +77,7 @@ def _build_registry() -> dict[str, ValidatorFn]:
     from learning.checks import (
         artifact_check,
         behavior_probe,
+        progress_check,
         pytest_check,
         python_probe,
         source_check,
@@ -90,6 +91,7 @@ def _build_registry() -> dict[str, ValidatorFn]:
         "source_check": source_check.run,
         "artifact_check": artifact_check.run,
         "toolchain_check": toolchain_check.run,
+        "progress_check": progress_check.run,
     }
 
 

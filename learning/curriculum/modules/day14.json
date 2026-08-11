@@ -159,7 +159,18 @@
         {
           "type": "do",
           "id": "do-interview",
-          "instructions": "Open the **Interview** tab in the learning UI and answer **at least 5 questions**, out loud or in writing — no looking at sample answers first.\n\nAs you go, keep a tally:\n\n- Which questions did you miss or stumble on?\n- Which **concepts** does the UI mark weak for you afterward?\n- Did any question (or its concept) come back within your 5?\n\nYou will need your weakest concept for the explain block below."
+          "instructions": "Open the **Interview** tab in the learning UI and answer **at least 5 questions**, out loud or in writing — no looking at sample answers first.\n\nAs you go, keep a tally:\n\n- Which questions did you miss or stumble on?\n- Which **concepts** does the UI mark weak for you afterward?\n- Did any question (or its concept) come back within your 5?\n\nYou will need your weakest concept for the explain block below. The check underneath counts your recorded answers, so this one cannot be finished from this page."
+        },
+        {
+          "type": "verify",
+          "id": "verify-drill",
+          "validator": "progress_check",
+          "mandatory": true,
+          "description": "Counts the interview answers recorded in your progress state. The objective of this lesson is the drill itself, so completion has to depend on it having happened.",
+          "args": {
+            "min_interview_answers": 5,
+            "success_note": "Five or more interview answers are on record — the drill happened, and the concept weights it produced are what the explain block below asks you to read."
+          }
         },
         {
           "type": "quiz",

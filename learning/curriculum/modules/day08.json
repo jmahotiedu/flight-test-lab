@@ -169,8 +169,8 @@
             "Malformed JSON after 250 ms",
             "The DUT refuses to start with conflicting faults"
           ],
-          "answer_index": 1,
-          "reveal": "The manifest composes: both switches are active at once. The delay applies to the response, the drop applies to the connection — so the answer arrives late AND the socket closes. Fault configs combine behaviors instead of forcing you to pick one, which is exactly what --fault cannot express."
+          "answer_index": 0,
+          "reveal": "The drop wins, and it wins immediately. Read the handler in `simulator/simulator.py`: `drop_connection` is checked as soon as the line arrives — before the request is decoded, and before `response_delay_ms` is applied — and it returns, closing the connection. The delay never runs because there is no longer a response to delay. (Measured: the client sees a closed socket in ~15 ms, not 250.)\n\nThat is the real lesson about composed faults. A manifest lets you set several switches, but the handler's *order* decides which ones can still matter: a terminal fault upstream turns everything downstream into dead configuration. When you write a fault manifest, read the code path rather than the field list — otherwise you will believe you exercised a delay that never ran."
         },
         {
           "type": "do",

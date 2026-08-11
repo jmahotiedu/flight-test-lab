@@ -188,7 +188,7 @@ class LearningHandler(BaseHTTPRequestHandler):
         progress = self.server.progress
         snapshot = progress.snapshot()
         record = snapshot["lessons"].get(lesson.id, {})
-        complete, missing = progress.lesson_completion(lesson)
+        complete, missing = progress.lesson_completion(lesson, self.server.curriculum)
         return {
             "id": lesson.id,
             "day": lesson.day,
@@ -450,7 +450,9 @@ class LearningHandler(BaseHTTPRequestHandler):
         lesson = self._lesson_or_404(body.get("lesson_id"))
         if lesson is None:
             return
-        complete, missing = self.server.progress.mark_complete(lesson)
+        complete, missing = self.server.progress.mark_complete(
+            lesson, self.server.curriculum
+        )
         if not complete:
             self._send_json(
                 {"complete": False, "missing": missing}, HTTPStatus.CONFLICT

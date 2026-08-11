@@ -250,6 +250,75 @@ def test_interview_answers_move_concept_mastery(tmp_path: Path) -> None:
     assert mastery["timing"]["weak"] is True
 
 
+def test_a_miss_resurfaces_a_previously_mastered_question(tmp_path: Path) -> None:
+    """Decay must follow the current streak, not the lifetime total.
+
+    Otherwise six correct answers bury the question so deeply that a later
+    miss cannot lift it back out — the model would be least likely to ask
+    exactly what you just got wrong.
+    """
+    store = ProgressStore(tmp_path / "progress.json")
+    questions = {"iq-known": ("timing",), "iq-unseen": ("timing",)}
+    for _ in range(6):
+        store.record_interview("iq-known", True, ("timing",))
+    buried = store.interview_weights(questions)["iq-known"]
+
+    store.record_interview("iq-known", False, ("timing",))
+    after_miss = store.interview_weights(questions)
+
+    assert after_miss["iq-known"] > buried
+    assert after_miss["iq-known"] > after_miss["iq-unseen"], (
+        "a question just answered wrong must outrank one never seen"
+    )
+
+
+def test_expected_red_demonstrations_do_not_penalise_mastery(tmp_path: Path) -> None:
+    """A non-mandatory check that is meant to fail is not a learner mistake."""
+    store = ProgressStore(tmp_path / "progress.json")
+    store.record_validation(
+        "d14-capstone", "v-symptom", False, mandatory=False, concepts=("timing",)
+    )
+    assert store.concept_mastery(("timing",))["timing"]["score"] is None
+
+    store.record_validation(
+        "d14-capstone", "v-real", False, mandatory=True, concepts=("timing",)
+    )
+    assert store.concept_mastery(("timing",))["timing"]["incorrect"] == 1
+
+
+def test_a_broken_prerequisite_invalidates_completed_dependents(
+    tmp_path: Path,
+) -> None:
+    """Failing A must stop C completing through an already-complete B.
+
+    Prerequisite checks read stored statuses, so without evaluating the chain
+    against current gate outcomes a single revocation leaves every downstream
+    lesson certified on a foundation that no longer holds.
+    """
+    curriculum = load_curriculum(LEARNING_ROOT, validator_names())
+    chain = ["d1-import-no-side-effects", "d1-main-entrypoint", "d1-argparse-logging"]
+    store = ProgressStore(tmp_path / "progress.json")
+
+    for lesson_id in chain:
+        lesson = curriculum.lessons[lesson_id]
+        for block in lesson.mandatory_validators():
+            store.record_validation(lesson.id, block["id"], True)
+        for block_id in lesson.required_quiz_ids():
+            store.record_quiz(lesson.id, block_id, True, lesson.concepts)
+        for block_id in lesson.required_explain_ids():
+            store.record_explain(lesson.id, block_id, True, lesson.concepts)
+        complete, missing = store.mark_complete(lesson, curriculum)
+        assert complete, missing
+
+    first = curriculum.lessons[chain[0]]
+    store.record_validation(first.id, first.mandatory_validators()[0]["id"], False)
+
+    last = curriculum.lessons[chain[-1]]
+    complete, missing = store.lesson_completion(last, curriculum)
+    assert not complete
+    assert any("prerequisite" in reason for reason in missing)
+
+
 def test_progress_file_is_written_atomically(tmp_path: Path) -> None:
     path = tmp_path / "progress.json"
     store = ProgressStore(path)

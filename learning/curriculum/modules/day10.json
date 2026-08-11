@@ -185,6 +185,7 @@
             "nodeids": ["evidence/exercises/test_controlled_failure.py"],
             "expect": "fail",
             "junit_contains": ["test_controlled_failure"],
+            "require_assertion_failure": true,
             "timeout_seconds": 60
           }
         },

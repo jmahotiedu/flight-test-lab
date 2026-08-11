@@ -202,11 +202,12 @@ class ProgressStore:
         with self._lock:
             record = self._lesson_record_locked(lesson_id)
             record["validations"][block_id] = {"passed": passed, "at": _now()}
-            # A validator outcome is evidence about a concept, exactly as a
-            # quiz answer is. Without this, a learner could fail the same
-            # mandatory check ten times and interview mode would never notice
-            # the concept it exposed — which the mastery model claims it does.
-            if concepts:
+            # A mandatory validator's outcome is evidence about a concept,
+            # exactly as a quiz answer is. Non-mandatory ones are excluded:
+            # some are demonstrations that are *supposed* to go red (Day 14's
+            # symptom probe), and counting those as misses would penalise the
+            # learner for following the instructions.
+            if concepts and mandatory:
                 self._bump_concepts_locked(concepts, passed)
             # Only a *mandatory* check can un-complete a lesson. Some lessons
             # ship a demonstration check that is meant to go red (Day 14's
@@ -264,9 +265,10 @@ class ProgressStore:
         """
         with self._lock:
             entry = self._state["interview"].setdefault(
-                question_id, {"correct": 0, "incorrect": 0}
+                question_id, {"correct": 0, "incorrect": 0, "streak": 0}
             )
             entry["correct" if correct else "incorrect"] += 1
+            entry["streak"] = int(entry.get("streak", 0)) + 1 if correct else 0
             if concepts:
                 self._bump_concepts_locked(concepts, correct)
             self._save_locked()
@@ -279,12 +281,46 @@ class ProgressStore:
             entry["correct" if correct else "incorrect"] += 1
             entry["last_seen"] = _now()
 
-    def lesson_completion(self, lesson: Lesson) -> tuple[bool, list[str]]:
+    def _prerequisite_satisfied_locked(
+        self,
+        lesson_id: str,
+        curriculum: Curriculum | None,
+        seen: set[str],
+    ) -> bool:
+        """Is this prerequisite genuinely satisfied, all the way up the chain?
+
+        Without the curriculum this can only trust the stored status. With it,
+        the lesson's own gates are re-evaluated: completing A then B, then
+        breaking A's mandatory check, must not leave C completable through a
+        B that is only nominally complete.
+        """
+        record = self._state["lessons"].get(lesson_id)
+        if record is None or record.get("status") != "complete":
+            return False
+        if curriculum is None or lesson_id in seen:
+            return True
+        prerequisite_lesson = curriculum.lessons.get(lesson_id)
+        if prerequisite_lesson is None:
+            return True
+        seen.add(lesson_id)
+        complete, _ = self._lesson_completion_locked(
+            prerequisite_lesson, curriculum, seen
+        )
+        return complete
+
+    def lesson_completion(
+        self, lesson: Lesson, curriculum: Curriculum | None = None
+    ) -> tuple[bool, list[str]]:
         """Return (complete, list-of-missing-requirements) for a lesson."""
         with self._lock:
-            return self._lesson_completion_locked(lesson)
+            return self._lesson_completion_locked(lesson, curriculum, set())
 
-    def _lesson_completion_locked(self, lesson: Lesson) -> tuple[bool, list[str]]:
+    def _lesson_completion_locked(
+        self,
+        lesson: Lesson,
+        curriculum: Curriculum | None = None,
+        seen: set[str] | None = None,
+    ) -> tuple[bool, list[str]]:
         """Gate evaluation, with the caller already holding the lock.
 
         mark_complete needs to evaluate the gates and write the status without
@@ -304,9 +340,15 @@ class ProgressStore:
         # Without this a client can complete a locked lesson directly through
         # the API, and because unlocking trusts stored statuses, that would
         # cascade: a broken prerequisite chain unlocks everything downstream.
-        lessons_state = self._state["lessons"]
+        #
+        # When the curriculum is available the chain is evaluated against
+        # *current* gate outcomes rather than stored statuses, so a mandatory
+        # check that started failing invalidates everything downstream of it
+        # even if those lessons were completed earlier.
+        seen = set(seen or ())
+        seen.add(lesson.id)
         for prerequisite in lesson.prerequisites:
-            if lessons_state.get(prerequisite, {}).get("status") != "complete":
+            if not self._prerequisite_satisfied_locked(prerequisite, curriculum, seen):
                 missing.append(f"prerequisite {prerequisite!r} is not complete")
         validations = record["validations"]
         for block in lesson.mandatory_validators():
@@ -321,9 +363,11 @@ class ProgressStore:
                 missing.append(f"explain {block_id!r} not answered")
         return (not missing, missing)
 
-    def mark_complete(self, lesson: Lesson) -> tuple[bool, list[str]]:
+    def mark_complete(
+        self, lesson: Lesson, curriculum: Curriculum | None = None
+    ) -> tuple[bool, list[str]]:
         with self._lock:
-            complete, missing = self._lesson_completion_locked(lesson)
+            complete, missing = self._lesson_completion_locked(lesson, curriculum)
             if not complete:
                 return False, missing
             record = self._lesson_record_locked(lesson.id)
@@ -407,9 +451,11 @@ class ProgressStore:
                     weight += 1.0 - float(score)
             history = interview_state.get(qid, {"correct": 0, "incorrect": 0})
             weight += 2.0 * float(history.get("incorrect", 0))
-            # Halve the weight per consecutive-ish correct answer (capped, so
-            # the arithmetic stays bounded), never below the floor.
-            correct = min(int(history.get("correct", 0)), 6)
-            weight *= 0.5**correct
+            # Decay on the *current streak*, not the lifetime total: a miss
+            # resets the streak, so a question answered right six times and
+            # then missed comes back immediately instead of staying buried
+            # under its own history — the opposite of what this mode is for.
+            streak = min(int(history.get("streak", 0)), 6)
+            weight *= 0.5**streak
             weights[qid] = max(weight, MIN_INTERVIEW_WEIGHT)
         return weights

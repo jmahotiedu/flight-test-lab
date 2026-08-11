@@ -110,13 +110,30 @@ def _check_json_fields(
                     "that produced the run, not just look like a hash"
                 )
         elif rule == "timestamp":
+            # Parseability is not identity: fromisoformat also accepts a bare
+            # date and a naive local datetime, neither of which names an
+            # unambiguous instant. A run manifest compared across machines
+            # needs a time *and* an offset.
+            text = value.strip().replace("Z", "+00:00")
             try:
-                datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+                parsed = datetime.fromisoformat(text)
             except ValueError:
                 failures.append(
                     f"{relative}: {field!r} is not an ISO-8601 timestamp "
                     f"({_describe(value)})"
                 )
+            else:
+                if "T" not in text and " " not in text:
+                    failures.append(
+                        f"{relative}: {field!r} is a date with no time of day "
+                        f"({_describe(value)}) — a run happens at an instant"
+                    )
+                elif parsed.tzinfo is None:
+                    failures.append(
+                        f"{relative}: {field!r} has no UTC offset "
+                        f"({_describe(value)}) — a local time means nothing on "
+                        "another machine; use datetime.now(UTC).isoformat()"
+                    )
         elif (
             isinstance(rule, str)
             and rule not in ("string", "commit", "timestamp")

@@ -10,7 +10,6 @@ suite.
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 import pytest
@@ -45,23 +44,20 @@ def test_toolchain_capabilities() -> None:
     assert not FULL.satisfies("nonsense-requirement")
 
 
-def test_windows_needs_a_generator_before_unlocking() -> None:
-    """A compiler alone is not enough on Windows.
+def test_a_build_backend_is_required_before_unlocking() -> None:
+    """A compiler alone is not enough, on any platform.
 
-    Without Ninja or a make, CMake picks Visual Studio even though g++ was
-    detected — so the module would unlock and its mandatory configure/build
-    path could not produce the GNU build the debugger lessons need.
+    CMake's default generator is Visual Studio on Windows (a build GDB cannot
+    read) and Unix Makefiles elsewhere (which still needs an external make).
+    Either way, unlocking the module without a backend offers a lesson whose
+    mandatory build cannot run.
     """
-    if sys.platform == "win32":
-        assert not NO_GENERATOR.can_build_cpp
-        assert "generator" in " ".join(NO_GENERATOR.missing_for("cpp-build"))
-        assert Toolchain(
-            cmake="cmake", ctest="ctest", cxx="g++", make="mingw32-make"
-        ).can_build_cpp
-    else:
-        # Elsewhere CMake's default generator (Unix Makefiles) works with the
-        # detected compiler, so no extra tool is required.
-        assert NO_GENERATOR.can_build_cpp
+    assert not NO_GENERATOR.can_build_cpp
+    assert "build backend" in " ".join(NO_GENERATOR.missing_for("cpp-build"))
+    assert Toolchain(cmake="cmake", ctest="ctest", cxx="g++", make="make").can_build_cpp
+    assert Toolchain(
+        cmake="cmake", ctest="ctest", cxx="g++", ninja="ninja"
+    ).can_build_cpp
 
 
 def test_missing_tools_are_named() -> None:
