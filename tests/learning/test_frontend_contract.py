@@ -190,3 +190,24 @@ def test_continue_checks_the_navigation_it_started_from() -> None:
     posted = body.index("await api.post")
     assert captured < posted, "the navigation token is captured after the request"
     assert "!== state.navigation" in body, "the stale response is never discarded"
+
+
+def test_handlers_that_finish_a_block_keep_their_button_disabled() -> None:
+    """guardedClick re-enables anything that does not say otherwise.
+
+    The explain handler set `disabled = true` itself and returned nothing, so
+    the guard's `if (!keepDisabled)` turned it straight back on — and
+    record_explain credits concept mastery on every request, so a finished
+    answer could be resubmitted from a disabled textarea, once per click.
+    """
+    source = APP_JS.read_text(encoding="utf-8")
+    handler = re.search(r'kind: "explain".*?\n    \}\);', source, re.DOTALL)
+    assert handler, "the explain handler is no longer shaped as expected"
+    body = handler.group(0)
+    success = body[body.index("if (data.passed)") : body.index("} else {")]
+    assert "return true" in success, (
+        "the success path does not tell guardedClick to keep the button disabled"
+    )
+    assert "btn.disabled = true" not in success, (
+        "disabling the button by hand does not survive the guard's finally"
+    )

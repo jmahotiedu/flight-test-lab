@@ -335,8 +335,17 @@ class DutRequestHandler(socketserver.StreamRequestHandler):
         )
         LOGGER.info("client_connected peer=%s:%s", peer[0], peer[1])
 
-        while line := self.rfile.readline(MAX_LINE_BYTES + 1):
-            if len(line) > MAX_LINE_BYTES:
+        # +2: exactly enough for a full-size payload plus "\r\n". readline
+        # blocks until it sees a newline or reaches this many bytes, so a
+        # larger allowance would leave the DUT waiting on a client that had
+        # already sent more than the protocol permits.
+        while line := self.rfile.readline(MAX_LINE_BYTES + 2):
+            # The bound is on the payload, not the frame. Counting the
+            # delimiter rejected a payload of exactly MAX_LINE_BYTES that the
+            # C++ DUT — which strips the newline before measuring — accepted,
+            # and the stripping here matches what raw_line is built from
+            # below, so the number checked is the number parsed.
+            if len(line.rstrip(b"\r\n")) > MAX_LINE_BYTES:
                 # Past the frame bound with no newline in sight. Answer, log
                 # and hang up: reading on would keep buffering a line that has
                 # already been rejected.

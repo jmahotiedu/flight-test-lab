@@ -162,8 +162,26 @@ enum class Next { Continue, Stop };
 // client half-closes without one.
 Next handle_line(const Socket& connection, const std::string& peer,
                  const ServerOptions& options, std::string line) {
-  if (!line.empty() && line.back() == '\r') {
+  // Every trailing '\r', not just one: the Python DUT builds its request with
+  // rstrip("\r\n"), so stopping at the first would leave the two DUTs parsing
+  // different bytes for a payload that ends in more than one.
+  while (!line.empty() && line.back() == '\r') {
     line.pop_back();
+  }
+
+  // The bound is on the payload, measured after the delimiter is gone — the
+  // same number the Python DUT checks. Applying it to the raw buffer instead
+  // rejected a payload of exactly kMaxLineBytes that Python's readline
+  // accepted, and let a terminated line through at whatever size the last
+  // read happened to deliver.
+  if (line.size() > kMaxLineBytes) {
+    log_message(Level::Warning, "request_too_long peer=" + peer + " bytes=" +
+                                    std::to_string(line.size()) + " limit=" +
+                                    std::to_string(kMaxLineBytes));
+    send_all(connection.get(),
+             std::string(R"({"error_code": "INVALID_JSON", "status": "error"})") +
+                 "\n");
+    return Next::Stop;
   }
 
   // Log the sanitised form: the raw bytes may not be valid UTF-8, and the

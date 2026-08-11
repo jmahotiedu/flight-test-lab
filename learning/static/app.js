@@ -412,10 +412,15 @@ function renderBlock(lesson, block, done) {
       feedback.innerHTML = "";
       if (data.passed) {
         box.classList.add("done");
-        area.disabled = true; btn.disabled = true;
+        area.disabled = true;
         feedback.append(el("div", { class: "feedback-pass" }, "Good — key point captured."));
         feedback.append(el("div", { class: "reveal", html: mdInline(data.sample_answer) }));
         refreshTopbar();
+        // Returning true is what keeps the button disabled: guardedClick
+        // re-enables anything that does not, and record_explain credits
+        // concept mastery on every request — so a finished explanation could
+        // be resubmitted from the disabled textarea, once per click.
+        return true;
       } else {
         feedback.append(el("div", { class: "feedback-fail" },
           "That is missing the key idea. Try once more, then compare with the reference answer."));

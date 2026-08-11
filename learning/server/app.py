@@ -591,6 +591,18 @@ class LearningHandler(BaseHTTPRequestHandler):
                 result = run_validator(
                     verify_block["validator"], args, self.server.context
                 )
+                # Checked again on the way out. Shutdown kills the running
+                # child, so this result is "we stopped it", not "the learner's
+                # work is broken" — recording it would revoke a completed
+                # lesson and move concept mastery because someone pressed
+                # Ctrl+C.
+                if self.server.shutting_down.is_set():
+                    self._send_error_json(
+                        HTTPStatus.SERVICE_UNAVAILABLE,
+                        "the learning server is shutting down; this check was "
+                        "stopped and its result discarded",
+                    )
+                    return
         except Exception as exc:  # noqa: BLE001 - a crash must still answer
             # Without this the exception unwinds out of do_POST, the connection
             # closes with no body, and the page sits on "Running…" forever —

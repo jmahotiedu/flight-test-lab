@@ -1397,3 +1397,74 @@ def test_lesson_checks_ignore_an_ambient_dut_selection(
 
     assert result.passed, result.interpretation
     assert "IMPLEMENTATION: python" in result.stdout, result.stdout[-400:]
+
+
+UNRELATED_MKDIR_LOCK = """from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+
+
+class BenchLock:
+    def __init__(self, path: str, owner: str) -> None:
+        self.path = Path(path)
+        self.owner = owner
+
+    def acquire(self) -> bool:
+        try:
+            self.path.parent.mkdir()      # the directory, not the lock
+        except FileExistsError:
+            pass
+        try:
+            self.path.read_text(encoding="utf-8")
+            return False
+        except FileNotFoundError:
+            pass
+        self.path.write_text(json.dumps({"owner": self.owner}), encoding="utf-8")
+        return True                       # read-then-write: racy
+
+    def release(self) -> None:
+        os.unlink(self.path)
+"""
+
+
+def test_an_exclusive_call_aimed_elsewhere_is_not_the_lock(
+    bench_module: Path,
+) -> None:
+    """`self.path.parent.mkdir()` creates the directory, not the lock.
+
+    Creating the parent inside try/except FileExistsError is ordinary and
+    harmless, and it satisfied "this function contains an exclusive create" —
+    so a read-then-write acquire() passed the shape gate. It also passes the
+    sequential probe, which is why the gate has to be the precise one.
+    """
+    bench_module.write_text(UNRELATED_MKDIR_LOCK, encoding="utf-8")
+    result = run_validator("source_check", _shape_gate(bench_module), CONTEXT)
+    assert not result.passed
+    assert "exclusive-create" in result.interpretation
+
+
+def test_the_lock_may_be_created_through_a_local_alias(bench_module: Path) -> None:
+    """Binding to the target must not demand one way of spelling it."""
+    bench_module.write_text(
+        "from __future__ import annotations\n"
+        "import os\n"
+        "from pathlib import Path\n\n\n"
+        "class BenchLock:\n"
+        "    def __init__(self, path: str, owner: str) -> None:\n"
+        "        self.path = Path(path)\n\n"
+        "    def acquire(self) -> bool:\n"
+        "        target = self.path\n"
+        "        try:\n"
+        "            handle = os.open(target, os.O_CREAT | os.O_EXCL | os.O_WRONLY)\n"
+        "        except FileExistsError:\n"
+        "            return False\n"
+        "        os.close(handle)\n"
+        "        return True\n\n"
+        "    def release(self) -> None:\n"
+        "        os.unlink(self.path)\n",
+        encoding="utf-8",
+    )
+    result = run_validator("source_check", _shape_gate(bench_module), CONTEXT)
+    assert result.passed, result.interpretation

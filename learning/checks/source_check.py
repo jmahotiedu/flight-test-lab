@@ -101,8 +101,72 @@ def _marked_functions(tree: ast.AST, requirement: str) -> list[str]:
     return marked
 
 
-def _creates_exclusively(node: ast.AST) -> bool:
-    """Does this call create a file in a way that fails if it already exists?
+def _is_module_reference(node: ast.AST) -> bool:
+    """True for `os` in `os.open(...)` — a module, not a path."""
+    return isinstance(node, ast.Name) and node.id in ("os", "pathlib", "shutil")
+
+
+def _names_lock_path(node: ast.AST | None, lock_paths: set[str]) -> bool:
+    """Does this expression name the lock file itself?
+
+    ``self.path`` and any local bound to it count; ``self.path.parent`` does
+    not, and neither does an unrelated attribute.
+    """
+    if isinstance(node, ast.Attribute):
+        return node.attr in lock_paths and isinstance(node.value, ast.Name)
+    if isinstance(node, ast.Name):
+        return node.id in lock_paths
+    return False
+
+
+def _lock_path_names(tree: ast.AST, function: ast.AST) -> set[str]:
+    """Every name that refers to the lock file.
+
+    Taken from ``__init__``: whatever attribute is assigned from a parameter
+    whose name mentions "path" is the lock, plus any local inside the checked
+    function bound to that attribute.  With nothing to go on the set stays
+    empty and the caller falls back to accepting any target rather than
+    rejecting a correct implementation for being differently written.
+    """
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef) or node.name != "__init__":
+            continue
+        parameters = {
+            argument.arg
+            for argument in node.args.args
+            if "path" in argument.arg.lower()
+        }
+        if not parameters:
+            continue
+        names |= parameters
+        for statement in ast.walk(node):
+            if not isinstance(statement, ast.Assign):
+                continue
+            if not any(
+                isinstance(inner, ast.Name) and inner.id in parameters
+                for inner in ast.walk(statement.value)
+            ):
+                continue
+            for assigned in statement.targets:
+                if isinstance(assigned, ast.Attribute):
+                    names.add(assigned.attr)
+                elif isinstance(assigned, ast.Name):
+                    names.add(assigned.id)
+    # Locals inside the function that alias one of those, e.g. `p = self.path`.
+    for statement in ast.walk(function):
+        if not isinstance(statement, ast.Assign):
+            continue
+        if not _names_lock_path(statement.value, names):
+            continue
+        for assigned in statement.targets:
+            if isinstance(assigned, ast.Name):
+                names.add(assigned.id)
+    return names
+
+
+def _creates_exclusively(node: ast.AST, lock_paths: set[str]) -> bool:
+    """Does this call create *the lock* in a way that fails if it exists?
 
     The forms that are genuinely atomic against a concurrent contender:
 
@@ -111,6 +175,12 @@ def _creates_exclusively(node: ast.AST) -> bool:
     * ``Path(...).touch(exist_ok=False)``
     * ``Path(...).mkdir()`` / ``os.mkdir(...)`` without ``exist_ok=True``
     * ``os.link`` / ``os.symlink`` — the classic NFS-safe lock primitives
+
+    ``lock_paths`` names the expressions that are the lock file, so an
+    exclusive call aimed somewhere else does not count.  A ``mkdir()`` on
+    ``self.path.parent`` — creating the directory the lock lives in, which is
+    ordinary and harmless — otherwise read as proof that the lock itself was
+    created atomically, and a read-then-write ``acquire()`` passed the gate.
     """
     if not isinstance(node, ast.Call):
         return False
@@ -118,6 +188,14 @@ def _creates_exclusively(node: ast.AST) -> bool:
     name = (
         target.attr if isinstance(target, ast.Attribute) else getattr(target, "id", "")
     )
+    # For a method call the receiver is the path (self.path.touch()); for a
+    # function call it is the first argument (os.open(self.path, ...)).
+    receiver = target.value if isinstance(target, ast.Attribute) else None
+    subject = receiver if name in ("touch", "mkdir", "open") and receiver else None
+    if subject is None or _is_module_reference(subject):
+        subject = node.args[0] if node.args else None
+    if not _names_lock_path(subject, lock_paths):
+        return False
 
     if name == "open":
         # os.open's flags and builtin open's mode can each be positional or
@@ -272,7 +350,10 @@ def run(args: dict[str, Any], context: ValidatorContext) -> CheckResult:
             function = _function_named(tree, exclusive_function)
             if function is None:
                 failures.append(f"{relative} does not define {exclusive_function!r}")
-            elif not any(_creates_exclusively(node) for node in ast.walk(function)):
+            elif not any(
+                _creates_exclusively(node, _lock_path_names(tree, function))
+                for node in ast.walk(function)
+            ):
                 failures.append(
                     f"{relative}: {exclusive_function}() never creates the lock "
                     "file with an exclusive-create operation — os.open(..., "

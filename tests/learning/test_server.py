@@ -569,4 +569,66 @@ def test_queued_validators_refuse_once_shutdown_begins(
     queued.join(timeout=30)
 
     assert runs == 1, "the queued handler started a subprocess during shutdown"
-    assert sorted(statuses) == [200, 503]
+    # Both answer 503: the queued one never ran, and the in-flight one was
+    # released after shutdown began, so its result is "we stopped it" rather
+    # than a verdict on the learner's work.
+    assert statuses == [503, 503]
+
+
+def test_a_validator_stopped_by_shutdown_is_not_recorded(
+    server: LearningServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ctrl+C kills the child, so its failure is ours, not the learner's.
+
+    Recording it revoked a completed lesson and moved concept mastery because
+    someone stopped the server. The flag was rechecked only before starting
+    queued work, never after an in-flight run returned.
+    """
+    import learning.server.app as app_module
+    from learning.server.validators import CheckResult
+
+    lesson = server.curriculum.lessons["d1-import-no-side-effects"]
+    server.progress.record_validation(lesson.id, "verify", True)
+    server.progress.record_explain(lesson.id, "explain", True, ())
+    server.progress.mark_started(lesson.id)
+    assert server.progress.mark_complete(lesson, server.curriculum)[0]
+    before = server.progress.concept_mastery(server.curriculum.concepts)
+
+    started = threading.Event()
+
+    def killed_validator(name: str, args: dict, context: object) -> CheckResult:
+        started.set()
+        time.sleep(0.5)
+        return CheckResult(
+            name=name,
+            passed=False,
+            exit_status=None,
+            stdout="",
+            stderr="killed",
+            duration_ms=0,
+            interpretation="Check failed: killed",
+        )
+
+    monkeypatch.setattr(app_module, "run_validator", killed_validator)
+
+    statuses: list[int] = []
+
+    def hit() -> None:
+        status, _ = _request(
+            server,
+            "POST",
+            "/api/validate",
+            {"lesson_id": lesson.id, "block_id": "verify"},
+        )
+        statuses.append(status)
+
+    worker = threading.Thread(target=hit)
+    worker.start()
+    assert started.wait(timeout=30)
+    server.begin_shutdown()
+    worker.join(timeout=30)
+
+    record = server.progress.snapshot()["lessons"][lesson.id]
+    assert record["status"] == "complete", "shutdown revoked a completed lesson"
+    assert server.progress.concept_mastery(server.curriculum.concepts) == before
+    assert statuses == [503]

@@ -835,6 +835,12 @@ def test_both_duts_bound_one_request_line(cpp_dut_binary: Path) -> None:
                 ("127.0.0.1", port), timeout=15
             ) as connection:
                 connection.sendall(b"x" * (MAX_LINE_BYTES + 1))
+                # Half-close so the frame is unambiguously over. Without it
+                # the two differ only in promptness: C++ rejects the moment
+                # the buffer passes the bound, while Python's readline waits
+                # for the byte that would complete its allowance — and then
+                # gives the same answer at EOF.
+                connection.shutdown(socket.SHUT_WR)
                 connection.settimeout(10)
                 reply = connection.makefile("rb").readline()
             time.sleep(0.2)
@@ -916,3 +922,52 @@ def test_the_line_cap_does_not_reject_a_pipelined_frame(
     replies = ask(python_dut)
     assert all(b"READY" in line for line in replies), replies
     assert ask(cpp_dut) == replies
+
+
+@pytest.mark.requirement("REQ-CPP-001")
+@pytest.mark.parametrize("delimiter", [b"\n", b"\r\n"])
+def test_the_frame_bound_counts_the_payload_not_the_delimiter(
+    cpp_dut: int, python_dut: int, delimiter: bytes
+) -> None:
+    """Both DUTs have to agree on where exactly the bound falls.
+
+    Python counted the delimiter, so a payload of exactly MAX_LINE_BYTES was
+    one byte over there and inside the limit for C++, which strips the newline
+    before measuring: INVALID_JSON from one, READY from the other.
+    """
+    from simulator.simulator import MAX_LINE_BYTES
+
+    prefix = b'{"command": "status", "sequence": 1, "pad": "'
+    suffix = b'"}'
+    payload = prefix + b"a" * (MAX_LINE_BYTES - len(prefix) - len(suffix)) + suffix
+    assert len(payload) == MAX_LINE_BYTES
+
+    def ask(port: int) -> bytes:
+        with socket.create_connection(("127.0.0.1", port), timeout=30) as connection:
+            connection.sendall(payload + delimiter)
+            connection.settimeout(20)
+            return connection.makefile("rb").readline()
+
+    reply = ask(python_dut)
+    assert b"READY" in reply, reply[:80]
+    assert ask(cpp_dut) == reply
+
+
+@pytest.mark.requirement("REQ-CPP-001")
+def test_one_byte_over_the_bound_is_refused_by_both(
+    cpp_dut: int, python_dut: int
+) -> None:
+    """The other side of the same boundary."""
+    from simulator.simulator import MAX_LINE_BYTES
+
+    payload = b"x" * (MAX_LINE_BYTES + 1)
+
+    def ask(port: int) -> bytes:
+        with socket.create_connection(("127.0.0.1", port), timeout=30) as connection:
+            connection.sendall(payload + b"\n")
+            connection.settimeout(20)
+            return connection.makefile("rb").readline()
+
+    reply = ask(python_dut)
+    assert b"INVALID_JSON" in reply, reply[:80]
+    assert ask(cpp_dut) == reply
