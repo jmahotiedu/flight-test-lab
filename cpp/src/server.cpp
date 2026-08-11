@@ -253,10 +253,18 @@ void handle_connection(Socket connection, std::string peer,
     // both. What the bound is for is a client that never sends a newline: the
     // buffer would grow until allocation fails, and an exception escaping a
     // thread entry point calls std::terminate.
-    if (buffer.size() > kMaxLineBytes) {
+    //
+    // Measured the way handle_line measures: trailing CRs are delimiter, not
+    // payload. Counting them here rejected a full-size frame ending "\r" that
+    // the EOF path would have answered — and that Python answers, since its
+    // readline strips before comparing.
+    std::size_t pending = buffer.size();
+    while (pending > 0 && buffer[pending - 1] == '\r') {
+      --pending;
+    }
+    if (pending > kMaxLineBytes) {
       log_message(Level::Warning, "request_too_long peer=" + peer + " bytes=" +
-                                      std::to_string(buffer.size()) +
-                                      " limit=" +
+                                      std::to_string(pending) + " limit=" +
                                       std::to_string(kMaxLineBytes));
       send_all(connection.get(),
                std::string(R"({"error_code": "INVALID_JSON", "status": "error"})") +

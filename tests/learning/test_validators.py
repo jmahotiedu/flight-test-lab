@@ -1468,3 +1468,39 @@ def test_the_lock_may_be_created_through_a_local_alias(bench_module: Path) -> No
     )
     result = run_validator("source_check", _shape_gate(bench_module), CONTEXT)
     assert result.passed, result.interpretation
+
+
+def test_an_evidence_manifest_with_a_repeated_key_is_rejected(tmp_path: Path) -> None:
+    """Two conflicting values cannot both be the record of one run.
+
+    json keeps the last occurrence silently, so a manifest could visibly hold
+    two `commit` lines and be certified as unambiguous on the strength of
+    whichever came second. The fault-config loader has refused this since it
+    was reported there; evidence is the same kind of claim.
+    """
+    spec = {"commit": r"^[0-9a-f]{7,40}$", "timestamp": "timestamp"}
+    path = tmp_path / "manifest.json"
+
+    path.write_text(
+        '{"commit": "deadbeef", "commit": "abc1234", '
+        '"timestamp": "2026-08-11T04:00:00+00:00"}',
+        encoding="utf-8",
+    )
+    duplicate = run_validator(
+        "artifact_check",
+        {"file": str(path), "json_fields": spec},
+        ValidatorContext(repo_root=tmp_path),
+    )
+    assert not duplicate.passed
+    assert "duplicate key" in duplicate.interpretation
+
+    path.write_text(
+        json.dumps({"commit": "abc1234", "timestamp": "2026-08-11T04:00:00+00:00"}),
+        encoding="utf-8",
+    )
+    clean = run_validator(
+        "artifact_check",
+        {"file": str(path), "json_fields": spec},
+        ValidatorContext(repo_root=tmp_path),
+    )
+    assert clean.passed, clean.interpretation

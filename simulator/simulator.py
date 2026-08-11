@@ -99,7 +99,7 @@ _FAULT_CONFIG_KEYS = {
 }
 
 
-def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     """json object hook that refuses a repeated key.
 
     json.loads keeps the last occurrence silently, so a manifest that visibly
@@ -121,7 +121,7 @@ def load_fault_config(path: Path) -> FaultConfig:
     """Load a fault configuration from a JSON file."""
     try:
         data = json.loads(
-            path.read_text(encoding="utf-8"), object_pairs_hook=_reject_duplicate_keys
+            path.read_text(encoding="utf-8"), object_pairs_hook=reject_duplicate_keys
         )
     # Every way json.loads can fail, not just the obvious one. JSONDecodeError
     # and UnicodeDecodeError are both ValueError subclasses; so is the

@@ -27,6 +27,11 @@ from learning.server.validators import (
     validator_names,
 )
 
+# Words an explanation must contain before a keyword hit counts. Low enough
+# that a real two-sentence answer clears it easily; high enough that a
+# single word copied out of the question does not.
+MIN_EXPLAIN_WORDS = 12
+
 LEARNING_ROOT = Path(__file__).resolve().parent.parent
 STATIC_ROOT = LEARNING_ROOT / "static"
 CONTENT_TYPES = {
@@ -149,11 +154,23 @@ class LearningHandler(BaseHTTPRequestHandler):
 
         origin = self.headers.get("Origin")
         if origin is not None:
-            allowed = {
-                f"http://{name}:{self.server.server_address[1]}"
-                for name in ("127.0.0.1", "localhost")
-            }
-            if origin not in allowed:
+            # Compared by parts, not by string. A browser omits the port when
+            # it is the scheme's default, so on --port 80 the dashboard's own
+            # Origin is "http://127.0.0.1" while a formatted allowlist holds
+            # "http://127.0.0.1:80" — and every POST from the page itself
+            # would be refused as cross-origin.
+            parsed = urlparse(origin)
+            port = (
+                parsed.port
+                if parsed.port is not None
+                else (443 if parsed.scheme == "https" else 80)
+            )
+            same_origin = (
+                parsed.scheme == "http"
+                and parsed.hostname in ("127.0.0.1", "localhost", "::1")
+                and port == self.server.server_address[1]
+            )
+            if not same_origin:
                 return f"cross-origin request from {origin!r} is not allowed"
 
         # Sent by current browsers and not forgeable by page script; absent on
@@ -528,12 +545,20 @@ class LearningHandler(BaseHTTPRequestHandler):
                 return
             lowered = answer_text.lower()
             hits = [kw for kw in block["keywords"] if kw.lower() in lowered]
-            passed = len(hits) >= 1
+            # A keyword alone is not an explanation. Typing one word from the
+            # question satisfied "explain this in your own words" — Day 14's
+            # drill accepted the literal string "concept" — so a floor on
+            # substance applies to every explain block, not just the one where
+            # the overlap was noticed. Deliberately low: this stays a check
+            # that you engaged, not a word count to game.
+            words = len(answer_text.split())
+            passed = bool(hits) and words >= MIN_EXPLAIN_WORDS
             progress.record_explain(lesson.id, block_id, passed, lesson.concepts)
             self._send_json(
                 {
                     "passed": passed,
                     "matched_keywords": hits,
+                    "too_short": bool(hits) and words < MIN_EXPLAIN_WORDS,
                     "sample_answer": block["sample_answer"],
                 }
             )

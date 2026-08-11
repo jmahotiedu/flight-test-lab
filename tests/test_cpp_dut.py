@@ -983,3 +983,33 @@ def test_one_byte_over_the_bound_is_refused_by_both(
     reply = ask(python_dut)
     assert b"INVALID_JSON" in reply, reply[:80]
     assert ask(cpp_dut) == reply
+
+
+@pytest.mark.requirement("REQ-CPP-001")
+def test_a_full_size_frame_ending_in_cr_is_answered_by_both(
+    cpp_dut: int, python_dut: int
+) -> None:
+    """CR is delimiter, not payload — including in the unterminated remainder.
+
+    A full-size frame ending "\r" and half-closed was rejected by the C++
+    remainder check before the EOF path could strip it, while Python's
+    readline strips before comparing: READY from one, INVALID_JSON from the
+    other.
+    """
+    from simulator.simulator import MAX_LINE_BYTES
+
+    prefix = b'{"command": "status", "sequence": 1, "pad": "'
+    suffix = b'"}'
+    payload = prefix + b"a" * (MAX_LINE_BYTES - len(prefix) - len(suffix)) + suffix
+    assert len(payload) == MAX_LINE_BYTES
+
+    def ask(port: int) -> bytes:
+        with socket.create_connection(("127.0.0.1", port), timeout=30) as connection:
+            connection.sendall(payload + b"\r")
+            connection.shutdown(socket.SHUT_WR)
+            connection.settimeout(20)
+            return connection.makefile("rb").readline()
+
+    reply = ask(python_dut)
+    assert b"READY" in reply, reply[:80]
+    assert ask(cpp_dut) == reply

@@ -632,3 +632,86 @@ def test_a_validator_stopped_by_shutdown_is_not_recorded(
     assert record["status"] == "complete", "shutdown revoked a completed lesson"
     assert server.progress.concept_mastery(server.curriculum.concepts) == before
     assert statuses == [503]
+
+
+@pytest.mark.parametrize(
+    ("label", "origin", "port", "accepted"),
+    [
+        # A browser omits the port when it is the scheme's default, so on
+        # --port 80 the dashboard's own Origin carries no port at all.
+        ("no port on 80", "http://127.0.0.1", 80, True),
+        ("explicit port on 80", "http://127.0.0.1:80", 80, True),
+        ("ordinary port", "http://127.0.0.1:8000", 8000, True),
+        ("localhost alias", "http://localhost:8000", 8000, True),
+        ("foreign host", "http://evil.example", 80, False),
+        ("wrong port", "http://127.0.0.1:9", 80, False),
+        ("https scheme", "https://127.0.0.1", 80, False),
+    ],
+)
+def test_origin_is_compared_by_parts_not_by_string(
+    label: str, origin: str, port: int, accepted: bool
+) -> None:
+    """Formatting an allowlist and comparing strings gets the default wrong.
+
+    On --port 80 every POST from the page itself was refused as cross-origin,
+    leaving the lessons unusable while the dashboard still loaded.
+    """
+    from learning.server.app import LearningHandler
+
+    class _Server:
+        server_address = ("127.0.0.1", port)
+
+    handler = LearningHandler.__new__(LearningHandler)
+    handler.server = _Server()  # type: ignore[assignment]
+    handler.headers = {  # type: ignore[assignment]
+        "Content-Type": "application/json",
+        "Origin": origin,
+    }
+
+    assert (handler._same_origin() is None) is accepted, label
+
+
+def test_a_single_word_is_not_an_explanation(server: LearningServer) -> None:
+    """ "Explain in your own words" was satisfied by one word from the question.
+
+    The floor applies to every explain block, not just the one where the
+    overlap was noticed — a keyword hit says the right topic was mentioned,
+    not that anything was explained.
+    """
+    lesson = server.curriculum.lessons["d14-interview-drill"]
+    block = next(b for b in lesson.blocks if b["type"] == "explain")
+
+    def submit(text: str) -> bool:
+        _, data = _request(
+            server,
+            "POST",
+            "/api/step",
+            {
+                "lesson_id": lesson.id,
+                "block_id": block["id"],
+                "kind": "explain",
+                "answer_text": text,
+            },
+        )
+        return bool(data["passed"])
+
+    assert submit("concept") is False, "a word from the question is not an answer"
+    assert submit(block["keywords"][0]) is False, "a bare keyword is not an answer"
+    assert submit(block["sample_answer"]) is True, block["sample_answer"]
+
+
+def test_every_sample_answer_clears_the_explain_floor() -> None:
+    """The lesson's own answer has to pass its own gate."""
+    from learning.server.app import MIN_EXPLAIN_WORDS
+    from learning.server.curriculum import load_curriculum
+    from learning.server.validators import validator_names
+
+    curriculum = load_curriculum(REPO_ROOT / "learning", validator_names())
+    for lesson in curriculum.lessons.values():
+        for block in lesson.blocks:
+            if block["type"] != "explain":
+                continue
+            sample = block["sample_answer"]
+            where = f"{lesson.id}/{block['id']}"
+            assert len(sample.split()) >= MIN_EXPLAIN_WORDS, where
+            assert any(k.lower() in sample.lower() for k in block["keywords"]), where

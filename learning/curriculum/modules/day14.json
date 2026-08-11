@@ -190,9 +190,12 @@
         {
           "type": "explain",
           "id": "explain",
-          "question": "Pick the concept interview mode marks as your weakest, and summarize its key idea in your own words — the version you could say out loud in an interview.",
+          "question": "Name the concept interview mode marks as your weakest, then state its key idea in your own words — the version you could say out loud in an interview. Naming it is half the answer; the word “concept” on its own is not any of it.",
           "keywords": [
-            "concept"
+            "weakest",
+            "key idea",
+            "in my own words",
+            "because"
           ],
           "sample_answer": "My weakest concept is failure-diagnosis. The key idea is that a failing check is evidence, not a verdict: you inspect the transcript and logs first, classify the failure as product, test, configuration, or infrastructure, then run a one-variable targeted check to confirm the root cause before recommending any fix."
         }

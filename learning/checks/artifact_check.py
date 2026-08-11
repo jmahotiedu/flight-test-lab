@@ -19,6 +19,7 @@ from typing import Any
 
 from learning.checks.source_check import _resolve_repo_path, read_artifact
 from learning.server.validators import CheckResult, ValidatorContext, truncate
+from simulator.simulator import reject_duplicate_keys
 
 
 def _junit_outcome(testcases: list[ET.Element]) -> set[str]:
@@ -284,10 +285,14 @@ def run(args: dict[str, Any], context: ValidatorContext) -> CheckResult:
     json_fields = args.get("json_fields")
     if isinstance(json_fields, dict) and text:
         try:
-            document = json.loads(text)
+            document = json.loads(text, object_pairs_hook=reject_duplicate_keys)
         # A learner-written artifact is arbitrary input: an oversized
         # integer raises ValueError and deep nesting RecursionError,
-        # neither of which is a JSONDecodeError.
+        # neither of which is a JSONDecodeError. A repeated key raises here
+        # too — json keeps the last one silently, so a manifest could hold two
+        # conflicting `commit` lines and be certified as the unambiguous
+        # record of a run on the strength of whichever came second. The fault
+        # manifest has refused that since round 17; evidence is no different.
         except (ValueError, RecursionError) as exc:
             failures.append(f"{relative} is not valid JSON ({exc})")
         else:
