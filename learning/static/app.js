@@ -482,11 +482,24 @@ async function nextInterviewQuestion() {
 
 async function submitInterviewAnswer() {
   if (!interviewCurrent) return;
+  const submit = document.getElementById("interview-submit");
+  // Disabled before the await, not after it. Every click of a double-click
+  // reached the request while the button was still live, so one answer was
+  // recorded several times — inflating concept mastery and letting a single
+  // answer submitted five times satisfy the Day 14 drill's five-answer gate.
+  if (submit.disabled) return;
   const answer = document.getElementById("interview-answer").value.trim();
   if (!answer) return;
-  const { data } = await api.post("/api/interview/answer", {
-    question_id: interviewCurrent.id, answer_text: answer,
-  });
+  submit.disabled = true;
+  let data;
+  try {
+    ({ data } = await api.post("/api/interview/answer", {
+      question_id: interviewCurrent.id, answer_text: answer,
+    }));
+  } catch (error) {
+    submit.disabled = false;  // a failed submission must stay retryable
+    throw error;
+  }
   const feedback = document.getElementById("interview-feedback");
   feedback.innerHTML = "";
   feedback.append(

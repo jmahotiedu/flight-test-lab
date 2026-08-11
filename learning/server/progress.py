@@ -504,13 +504,27 @@ class ProgressStore:
         it and name a prerequisite the roadmap shows as done.
         """
         complete = self.completion_map(curriculum)
-        for lesson_id in curriculum.ordered_lesson_ids:
-            lesson = curriculum.lessons[lesson_id]
-            if lesson.status == "unavailable":
-                continue
+
+        def is_actionable(lesson_id: str) -> bool:
+            lesson = curriculum.lessons.get(lesson_id)
+            if lesson is None or lesson.status == "unavailable":
+                return False
             if complete.get(lesson_id):
-                continue
-            if all(complete.get(prereq, False) for prereq in lesson.prerequisites):
+                return False
+            return all(complete.get(prereq, False) for prereq in lesson.prerequisites)
+
+        # Where the learner actually was, when that is still somewhere they can
+        # work. Program order alone sends them to the earliest unfinished
+        # lesson, which is the wrong one whenever the roadmap has branches:
+        # finishing Day 10 unlocks Day 11 and the independent Day 13, so a
+        # learner who chose Day 13 and restarted landed back on Day 11.
+        with self._lock:
+            last = self._state.get("last_lesson_id")
+        if isinstance(last, str) and is_actionable(last):
+            return last
+
+        for lesson_id in curriculum.ordered_lesson_ids:
+            if is_actionable(lesson_id):
                 return lesson_id
         # Everything available is complete: return the last lesson so the
         # UI has somewhere sensible to land.

@@ -587,3 +587,67 @@ def test_the_interview_baseline_is_taken_on_first_entry(tmp_path: Path) -> None:
     store.mark_started("d14-interview-drill")
     record = store.snapshot()["lessons"]["d14-interview-drill"]
     assert record["interview_baseline"] == 6
+
+
+def test_resume_returns_the_lesson_the_learner_was_actually_in(
+    tmp_path: Path,
+) -> None:
+    """Program order is the fallback, not the answer.
+
+    Finishing Day 10 unlocks Day 11 and the independent Day 13 branch, so a
+    learner who chose Day 13 and restarted landed back on Day 11 — while the
+    progress file had recorded exactly where they were the whole time.
+    """
+    from learning.server.toolchain import Toolchain
+
+    full = Toolchain(cmake="cmake", ctest="ctest", cxx="g++", gdb="gdb", make="make")
+    curriculum = load_curriculum(LEARNING_ROOT, validator_names(), toolchain=full)
+    store = ProgressStore(tmp_path / "progress.json")
+
+    def finish(lesson_id: str) -> bool:
+        lesson = curriculum.lessons[lesson_id]
+        for block in lesson.mandatory_validators():
+            store.record_validation(
+                lesson.id, block["id"], True, historical=bool(block.get("historical"))
+            )
+        for block_id in lesson.required_quiz_ids():
+            store.record_quiz(lesson.id, block_id, True, lesson.concepts)
+        for block_id in lesson.required_explain_ids():
+            store.record_explain(lesson.id, block_id, True, lesson.concepts)
+        store.mark_started(lesson.id)
+        return store.mark_complete(lesson, curriculum)[0]
+
+    for lesson_id in curriculum.ordered_lesson_ids:
+        if curriculum.lessons[lesson_id].day > 10:
+            break
+        assert finish(lesson_id), lesson_id
+
+    branch = next(
+        lesson_id
+        for lesson_id in curriculum.ordered_lesson_ids
+        if curriculum.lessons[lesson_id].day == 13
+    )
+    store.mark_started(branch)
+    assert store.resume_lesson_id(curriculum) == branch
+
+    # Once it is finished, program order takes over again.
+    assert finish(branch)
+    resumed = store.resume_lesson_id(curriculum)
+    assert resumed != branch
+    assert curriculum.lessons[resumed].day == 11
+
+
+def test_resume_ignores_a_last_lesson_that_is_no_longer_actionable(
+    tmp_path: Path,
+) -> None:
+    """A stale pointer must not strand the learner.
+
+    last_lesson_id is written by every mutation, including ones on lessons
+    that are complete, locked, or unavailable on this machine.
+    """
+    curriculum = load_curriculum(LEARNING_ROOT, validator_names())
+    store = ProgressStore(tmp_path / "progress.json")
+
+    store.mark_started("d9-threaded-server")  # locked: Day 1 is not done
+    assert store.snapshot()["last_lesson_id"] == "d9-threaded-server"
+    assert store.resume_lesson_id(curriculum) == curriculum.ordered_lesson_ids[0]

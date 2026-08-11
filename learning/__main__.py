@@ -80,6 +80,11 @@ def _serve(args: argparse.Namespace, repo_root: Path, progress_path: Path) -> in
     except KeyboardInterrupt:
         print("\nstopped")
     finally:
+        # Order matters. Closing the door first means a handler queued on the
+        # validator lock refuses instead of starting a fresh subprocess after
+        # the sweep below has already run — validator children live in their
+        # own process group, so one started late would outlive this process.
+        server.begin_shutdown()
         # Handler threads are daemons and validator children run in their own
         # process group, so without this a Ctrl+C during a long pytest, CMake
         # or GDB check would leave that process — and any DUT it started —

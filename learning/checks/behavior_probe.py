@@ -286,19 +286,21 @@ def run(args: dict[str, Any], context: ValidatorContext) -> CheckResult:
     # capstone could be completed without ever running the experiment it is
     # about.
     if bool(args.get("expect_failure", False)):
-        # Red is not enough: it has to be red for the *stated* reason. Without
-        # this, running the probe with no fault at all still "passed", on the
-        # strength of the missing fault_injected log line — a different
-        # failure entirely, and one that proves the fault never engaged.
+        # Red is not enough: it has to be red for the *stated* reason, and for
+        # that reason only. Matching "any failure matches" let a run pass on
+        # the timing symptom while the fault_injected log line was also
+        # missing — and that missing line is what separates a configured delay
+        # from an organic one, which is the whole diagnosis.
         wanted = args.get("expect_failure_matches")
-        detail = "; ".join(failures)
-        matched = not isinstance(wanted, str) or bool(re.search(wanted, detail))
-        passed = observed_failure and matched
+        symptom = [f for f in failures if re.search(str(wanted), f)] if wanted else []
+        unexpected = [f for f in failures if f not in symptom]
+        passed = bool(symptom) and not unexpected if wanted else observed_failure
         if passed:
             interpretation = str(
                 args.get(
                     "success_note",
-                    f"The symptom reproduced, which is the point: {detail}",
+                    "The symptom reproduced, which is the point: "
+                    + "; ".join(symptom or failures),
                 )
             )
         elif not observed_failure:
@@ -307,10 +309,16 @@ def run(args: dict[str, Any], context: ValidatorContext) -> CheckResult:
                 "and did not — the DUT behaved normally, so there is no "
                 "symptom to diagnose. Check the fault arguments."
             )
-        else:
+        elif not symptom:
             interpretation = (
                 f"Check failed: the run went red for the wrong reason. "
-                f"Expected a failure matching /{wanted}/, got: {detail}"
+                f"Expected a failure matching /{wanted}/, got: " + "; ".join(failures)
+            )
+        else:
+            interpretation = (
+                "Check failed: the symptom reproduced, but something else "
+                "went wrong too, so the run does not show what it claims: "
+                + "; ".join(unexpected)
             )
     else:
         passed = not observed_failure

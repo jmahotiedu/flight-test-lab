@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 import json
+import os
 import socket
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
 from conftest import RunningDut
 from testlab.client import LabClient
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 @pytest.mark.requirement("REQ-PROTO-001")
@@ -105,3 +111,33 @@ def test_missing_command_is_rejected(lab_client: LabClient) -> None:
         "error_code": "MISSING_COMMAND",
         "sequence": 6,
     }
+
+
+@pytest.mark.requirement("REQ-PROTO-002")
+def test_the_digit_bound_does_not_depend_on_the_interpreter() -> None:
+    """The protocol decides what a request means, not the environment.
+
+    PYTHONINTMAXSTRDIGITS=1000 made this DUT reject a 1001-digit request the
+    C++ DUT accepts — and, in the other direction, unable to serialise a
+    number it had just parsed, since int-to-str is capped too. The module
+    raises the interpreter's limit to the protocol's on import.
+    """
+    digits = "1" * 4300
+    probe = (
+        "import json, sys;"
+        "from simulator.simulator import decode_request, build_response;"
+        f'm, ok = decode_request(\'{{"command": "status", "sequence": {digits}}}\');'
+        "print(ok, json.dumps(build_response(m))[:0] == '',"
+        " str(build_response(m)['sequence']) == '" + digits + "')"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+        cwd=str(REPO_ROOT),
+        env={**os.environ, "PYTHONINTMAXSTRDIGITS": "640"},
+    )
+    assert result.returncode == 0, result.stderr[-500:]
+    assert result.stdout.split() == ["True", "True", "True"], result.stdout

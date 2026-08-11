@@ -8,6 +8,7 @@ import logging
 import os
 import signal
 import socketserver
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -31,6 +32,16 @@ MAX_NESTING_DEPTH = 100
 # answer does not depend on the interpreter's setting, and the C++ DUT
 # (cpp/src/json.cpp, kMaxIntDigits) enforces the same number.
 MAX_INT_DIGITS = 4300
+
+# The protocol's bound has to be the one that decides, so the interpreter's is
+# raised to meet it.  PYTHONINTMAXSTRDIGITS=1000 otherwise makes this DUT
+# reject a 1001-digit request the C++ DUT accepts — and, in the other
+# direction, unable to *serialise* a number it just parsed, because int-to-str
+# is capped too.  Either way the environment, not the protocol, would decide
+# what a request means. Only ever raised: an environment that allows more
+# keeps it.
+if sys.get_int_max_str_digits() < MAX_INT_DIGITS:
+    sys.set_int_max_str_digits(MAX_INT_DIGITS)
 
 # Upper bound for any injected delay.  time.sleep() raises OverflowError on a
 # large-but-valid integer, which in the request path means the client gets no

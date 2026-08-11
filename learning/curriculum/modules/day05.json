@@ -101,8 +101,8 @@
         {
           "type": "predict",
           "id": "predict",
-          "question": "Run `pytest tests/test_cleanup.py tests/test_status.py tests/test_protocol.py` — 8 tests across 3 files, 4 of which request `lab_client` and 4 `dut` directly. How many simulator processes start?",
-          "options": ["8 — one per test", "8 — one per fixture request", "3 — one per file", "1 — session scope builds dut once"],
+          "question": "Run `pytest tests/test_cleanup.py tests/test_status.py tests/test_protocol.py` — 9 tests across 3 files, 4 of which request `lab_client` and 4 `dut` directly. How many simulator processes start?",
+          "options": ["9 — one per test", "8 — one per fixture request", "3 — one per file", "1 — session scope builds dut once"],
           "answer_index": 3,
           "reveal": "(The whole `tests/` tree is much larger now and several of its suites spawn DUTs of their own, so this counts only the three files that share this fixture.) `dut` is declared `@pytest.fixture(scope=\"session\")`: the first request builds it (spawn + readiness poll), every later request reuses the same RunningDut, and teardown kills the process once at session end. lab_client being function-scoped only means a new TCP connection per test — to the same process."
         },

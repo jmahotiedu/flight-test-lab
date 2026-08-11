@@ -63,6 +63,16 @@ class LearningServer(ThreadingHTTPServer):
         # artefacts of the collision. Disabling a DOM button cannot fix this;
         # it is not the same document.
         self.validator_lock = threading.Lock()
+        # Set once, on the way down. terminate_active_validators() kills the
+        # children registered at the moment it runs, and a handler queued on
+        # validator_lock would otherwise wake afterwards and start a fresh
+        # pytest, CMake or DUT — in its own process group, so it outlives the
+        # server that spawned it. Queued work is refused rather than run.
+        self.shutting_down = threading.Event()
+
+    def begin_shutdown(self) -> None:
+        """Stop accepting new validator work.  Idempotent."""
+        self.shutting_down.set()
 
 
 def build_server(
@@ -567,6 +577,17 @@ class LearningHandler(BaseHTTPRequestHandler):
             # refusing — a learner who clicks twice wants both answers, just
             # not both at once.
             with self.server.validator_lock:
+                # Re-checked *inside* the lock: waiting here is exactly where
+                # a handler sits while the server is being shut down, and
+                # starting a subprocess now would put it beyond the reach of
+                # the cleanup that has already run.
+                if self.server.shutting_down.is_set():
+                    self._send_error_json(
+                        HTTPStatus.SERVICE_UNAVAILABLE,
+                        "the learning server is shutting down; this check was "
+                        "not started",
+                    )
+                    return
                 result = run_validator(
                     verify_block["validator"], args, self.server.context
                 )

@@ -509,3 +509,64 @@ def test_validators_do_not_run_concurrently(
     intervals.sort()
     for earlier, later in zip(intervals, intervals[1:], strict=False):
         assert earlier[1] <= later[0] + 0.01, f"validators overlapped: {intervals}"
+
+
+def test_queued_validators_refuse_once_shutdown_begins(
+    server: LearningServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A handler waiting on the lock must not start work after the sweep.
+
+    terminate_active_validators() kills the children registered when it runs.
+    A queued handler waking afterwards starts a fresh pytest, CMake or DUT in
+    its own process group — one that outlives the server that spawned it.
+    """
+    import learning.server.app as app_module
+    from learning.server.validators import CheckResult
+
+    started = threading.Event()
+    release = threading.Event()
+    runs = 0
+
+    def blocking_validator(name: str, args: dict, context: object) -> CheckResult:
+        nonlocal runs
+        runs += 1
+        started.set()
+        release.wait(timeout=30)
+        return CheckResult(
+            name=name,
+            passed=True,
+            exit_status=0,
+            stdout="",
+            stderr="",
+            duration_ms=0,
+            interpretation="ok",
+        )
+
+    monkeypatch.setattr(app_module, "run_validator", blocking_validator)
+
+    statuses: list[int] = []
+
+    def hit() -> None:
+        status, _ = _request(
+            server,
+            "POST",
+            "/api/validate",
+            {"lesson_id": "d1-import-no-side-effects", "block_id": "verify"},
+        )
+        statuses.append(status)
+
+    first = threading.Thread(target=hit)
+    first.start()
+    assert started.wait(timeout=30), "the first validator never started"
+
+    queued = threading.Thread(target=hit)
+    queued.start()
+    time.sleep(0.2)  # let it reach the lock
+
+    server.begin_shutdown()
+    release.set()
+    first.join(timeout=30)
+    queued.join(timeout=30)
+
+    assert runs == 1, "the queued handler started a subprocess during shutdown"
+    assert sorted(statuses) == [200, 503]

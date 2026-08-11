@@ -1326,3 +1326,39 @@ def test_an_ordinary_probe_is_unaffected_by_the_new_flag() -> None:
         ]
     }
     assert run_validator("behavior_probe", clean, CONTEXT).passed
+
+
+def test_an_expected_failure_still_requires_its_positive_evidence() -> None:
+    """Red for the stated reason, and for that reason only.
+
+    Day 14's capstone is a delay the learner must classify as configured
+    rather than organic, and the fault_injected log line is what makes that
+    call. Accepting "any failure matches the symptom" let the timing breach
+    carry a run whose log evidence was missing — which is the half that
+    distinguishes the two explanations.
+    """
+    base = {
+        "dut_args": ["--fault", "delayed_response", "--fault-delay-ms", "400"],
+        "steps": [
+            {
+                "send": {"command": "status", "sequence": 1},
+                "expect": {"state": "READY"},
+                "max_elapsed_ms": 250,
+            }
+        ],
+        "expect_failure": True,
+        "expect_failure_matches": "over the 250 ms budget",
+    }
+
+    with_evidence = run_validator(
+        "behavior_probe", {**base, "log_expect_regex": "fault_injected"}, CONTEXT
+    )
+    assert with_evidence.passed, with_evidence.interpretation
+
+    missing_evidence = run_validator(
+        "behavior_probe",
+        {**base, "log_expect_regex": "this_string_never_appears"},
+        CONTEXT,
+    )
+    assert not missing_evidence.passed
+    assert "something else went wrong too" in missing_evidence.interpretation
