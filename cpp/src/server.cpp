@@ -486,12 +486,23 @@ int run_server(const ServerOptions& options, std::atomic<bool>& stop_requested) 
       handler.thread.join();
     }
   }
-  const bool all_finished = std::all_of(
-      handlers.begin(), handlers.end(),
-      [](const Handler& handler) { return handler.done->load(); });
+  // Second pass, and the decision is "did we join it", not "does it say it is
+  // done". A handler that finished between its own timed-out check and this
+  // point would otherwise report done, satisfy the scan, and be destroyed
+  // while still joinable — which is std::terminate, i.e. a crash produced by
+  // the code meant to make shutdown graceful.
+  bool all_joined = true;
+  for (Handler& handler : handlers) {
+    if (handler.done->load() && handler.thread.joinable()) {
+      handler.thread.join();
+    }
+    if (handler.thread.joinable()) {
+      all_joined = false;
+    }
+  }
 
   log_message(Level::Info, "dut_stopped requested=True");
-  if (!all_finished) {
+  if (!all_joined) {
     // The hang fault blocks a handler on purpose and forever, so waiting is
     // not an option and neither is destroying Winsock underneath it. Leaving
     // without running static destructors is the only ending that races

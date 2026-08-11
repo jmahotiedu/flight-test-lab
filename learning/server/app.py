@@ -163,9 +163,26 @@ class LearningHandler(BaseHTTPRequestHandler):
             return f"cross-site request (Sec-Fetch-Site: {site})"
         return None
 
+    def _content_length(self) -> int | None:
+        """The declared body size, or None when the header is unusable.
+
+        int() on a header raises for "nope" and for a value past CPython's
+        digit limit, and that exception escaped before any of the JSON
+        handling ran: a traceback and a closed connection instead of the
+        documented 400.
+        """
+        raw = self.headers.get("Content-Length")
+        if raw is None:
+            return 0
+        try:
+            length = int(raw)
+        except ValueError:
+            return None
+        return length if length >= 0 else None
+
     def _discard_body(self) -> None:
         """Consume the request body so the connection can close cleanly."""
-        remaining = min(int(self.headers.get("Content-Length") or 0), 64 * 1024)
+        remaining = min(self._content_length() or 0, 64 * 1024)
         while remaining > 0:
             chunk = self.rfile.read(min(remaining, 8192))
             if not chunk:
@@ -173,8 +190,8 @@ class LearningHandler(BaseHTTPRequestHandler):
             remaining -= len(chunk)
 
     def _read_body(self) -> dict[str, Any] | None:
-        length = int(self.headers.get("Content-Length") or 0)
-        if length <= 0 or length > 64 * 1024:
+        length = self._content_length()
+        if length is None or length <= 0 or length > 64 * 1024:
             return None
         try:
             data = json.loads(self.rfile.read(length))

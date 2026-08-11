@@ -743,7 +743,7 @@ def test_cpp_dut_rejects_an_option_missing_its_value(
     reason="terminate() is TerminateProcess on Windows, so the graceful "
     "shutdown path cannot be reached from here; CI exercises it on Linux",
 )
-@pytest.mark.parametrize("fault", [None, "hang"])
+@pytest.mark.parametrize("fault", [None, "hang", "disconnect-at-deadline"])
 def test_cpp_dut_shuts_down_with_a_client_connected(
     cpp_dut_binary: Path, fault: str | None
 ) -> None:
@@ -755,9 +755,15 @@ def test_cpp_dut_shuts_down_with_a_client_connected(
     forever on purpose, so waiting is not an option and neither is destroying
     Winsock underneath it. Both endings have to be prompt.
     """
+    # "disconnect-at-deadline" is not a DUT fault: it is this test hanging up
+    # at the moment shutdown decides whether to join, which is the window
+    # where a handler could report done after its join was declined and then
+    # be destroyed while still joinable — std::terminate, produced by the
+    # code meant to make shutdown graceful.
+    racing_disconnect = fault == "disconnect-at-deadline"
     port = reserve_local_port()
     argv = [str(cpp_dut_binary), "--host", "127.0.0.1", "--port", str(port)]
-    if fault:
+    if fault and not racing_disconnect:
         argv += ["--fault", fault, "--fault-after", "1"]
     process = subprocess.Popen(
         argv,
@@ -770,13 +776,15 @@ def test_cpp_dut_shuts_down_with_a_client_connected(
         _wait_for_accept("127.0.0.1", port)
         connection = socket.create_connection(("127.0.0.1", port), timeout=5)
         connection.sendall(b'{"command": "status", "sequence": 1}\n')
-        if not fault:
-            connection.makefile("rb").readline()
-        else:
+        if fault == "hang":
             time.sleep(0.5)  # let the handler reach the deadlock
+        else:
+            connection.makefile("rb").readline()
 
         started = time.monotonic()
         process.terminate()
+        if racing_disconnect:
+            connection.close()  # the handler finishes as shutdown scans
         exit_code = process.wait(timeout=20)
         elapsed = time.monotonic() - started
         stderr = process.stderr.read() if process.stderr else ""
@@ -791,6 +799,10 @@ def test_cpp_dut_shuts_down_with_a_client_connected(
     assert "dut_stopped" in stderr
     if fault == "hang":
         assert "handler_still_running" in stderr
+    if racing_disconnect:
+        # A crash here is exit 3 (abort) on Windows and -SIGABRT on POSIX;
+        # exit_code == 0 above already covers it, and this names why.
+        assert "dut_stopped" in stderr
 
 
 @pytest.mark.requirement("REQ-CPP-001")

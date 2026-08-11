@@ -277,26 +277,48 @@ def _incompatible_cached_compiler(context: ValidatorContext) -> str | None:
 
     Leaving an existing tree alone is right in general — CMake cannot switch
     generators in place, and fighting the learner's own configure would be
-    absurd.  But if that cache pins MSVC while gdb is what unlocked Days 11-12,
-    every Day 11 check would pass and every Day 12 check would fail on symbols
-    GDB cannot read.  Better to say so here, where the remedy is one command.
+    absurd.  But two things about a cache make Day 12 impossible rather than
+    merely awkward, and both are worth saying here, where the remedy is one
+    command:
+
+    * a compiler whose debug symbols GDB cannot read (MSVC ships PDBs);
+    * an optimising build type.  ``verify-backtrace`` requires trigger_crash,
+      run_server and main in the stack, and at -O2 trigger_crash is inlined
+      away — it is not even in a Release binary's symbol table. The learner
+      would be left guessing that the build tree has to be deleted.
     """
     cache = context.repo_root / "cpp" / "build" / "CMakeCache.txt"
     if not cache.is_file() or not cached_toolchain().gdb:
         return None
+
+    remedy = (
+        "That directory is entirely generated, so delete it and let this "
+        "check reconfigure it: rm -rf cpp/build "
+        "(PowerShell: Remove-Item -Recurse -Force cpp/build)"
+    )
     for line in cache.read_text(encoding="utf-8", errors="replace").splitlines():
+        if line.startswith("CMAKE_BUILD_TYPE:"):
+            build_type = line.split("=", 1)[-1].strip().lower()
+            # An empty CMAKE_BUILD_TYPE means "no optimisation flags from
+            # CMake", which keeps the frames GDB needs; only the explicitly
+            # optimising types are a problem.
+            if build_type in ("release", "minsizerel"):
+                return (
+                    f"cpp/build was configured as a {build_type} build, which "
+                    "optimises trigger_crash away — the Day 12 backtrace check "
+                    "looks for it by name and would fail on a stack that never "
+                    f"contains it. {remedy}"
+                )
         if not line.startswith("CMAKE_CXX_COMPILER:"):
             continue
         compiler = line.split("=", 1)[-1].strip().replace("\\", "/").lower()
         name = compiler.rsplit("/", 1)[-1]
         if any(token in name for token in ("g++", "gcc", "clang", "c++")):
-            return None
+            continue
         return (
             f"cpp/build was configured with {compiler or 'an unknown compiler'}, "
             "whose debug symbols GDB cannot read — the Day 12 checks would fail "
-            "on it. That directory is entirely generated, so delete it and let "
-            "this check reconfigure with the detected GNU toolchain: "
-            "rm -rf cpp/build (PowerShell: Remove-Item -Recurse -Force cpp/build)"
+            f"on it. {remedy}"
         )
     return None
 
