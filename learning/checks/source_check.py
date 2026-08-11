@@ -43,6 +43,22 @@ def read_artifact(target: Path, relative: str) -> tuple[str, str]:
         return "", f"{relative} could not be read: {exc.strerror or exc}"
 
 
+def _decorator_names(function: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
+    """Every attribute/name used anywhere in this function's decorators.
+
+    The whole subtree, because pytest's other idiom nests marks inside
+    ``pytest.param(..., marks=pytest.mark.requirement(...))``.
+    """
+    names: set[str] = set()
+    for decorator in function.decorator_list:
+        for node in ast.walk(decorator):
+            if isinstance(node, ast.Attribute):
+                names.add(node.attr)
+            elif isinstance(node, ast.Name):
+                names.add(node.id)
+    return names
+
+
 def _marked_functions(tree: ast.AST, requirement: str) -> list[str]:
     """Names of test functions carrying @pytest.mark.requirement(<requirement>).
 
@@ -213,22 +229,61 @@ def run(args: dict[str, Any], context: ValidatorContext) -> CheckResult:
                     "identifier appearing in a comment is not the operation"
                 )
 
-    marker_requirement = args.get("must_have_requirement_marker")
-    if isinstance(marker_requirement, str) and text:
-        # Parse the decorators rather than searching the text: the ID appearing
-        # in a comment or a docstring is not a marker, and a check that accepts
-        # it certifies a test with no requirement linkage at all.
+    # Every condition here must hold on ONE function. Checking "some function
+    # is marked" and "some function is parametrized" separately lets a marked
+    # test_unrelated satisfy the marker while the test the traceability row
+    # and the JUnit gate actually match carries no requirement link at all.
+    if "must_have_requirement_marker" in args:
+        # Ignoring the old key would turn a gate into a no-op, which is the
+        # failure mode this whole check exists to prevent.
+        raise ValueError(
+            "must_have_requirement_marker was replaced by must_mark_function, "
+            "which binds the marker to the function the other gates match; "
+            "accepting any marked function in the file certified nothing"
+        )
+
+    marker_spec = args.get("must_mark_function")
+    if marker_spec is not None and text:
+        if not isinstance(marker_spec, dict):
+            raise ValueError(
+                "must_mark_function takes an object: "
+                "{'requirement': ..., 'name': <regex>, 'also_decorated_with': [...]}"
+            )
+        requirement = str(marker_spec["requirement"])
+        name_pattern = str(marker_spec.get("name", "."))
+        also = [str(item) for item in marker_spec.get("also_decorated_with", [])]
         try:
             tree = ast.parse(text)
         except SyntaxError as exc:
             failures.append(f"{relative} does not parse as Python: {exc}")
         else:
-            if not _marked_functions(tree, marker_requirement):
-                failures.append(
-                    f"{relative} has no test function decorated with "
-                    f"@pytest.mark.requirement({marker_requirement!r}) — the ID "
-                    "appearing in a comment or string does not link anything"
-                )
+            candidates = [
+                node
+                for node in ast.walk(tree)
+                if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+                and node.name.startswith("test_")
+                and re.search(name_pattern, node.name)
+            ]
+            marked = set(_marked_functions(tree, requirement))
+            satisfied = [
+                node
+                for node in candidates
+                if node.name in marked
+                and all(mark in _decorator_names(node) for mark in also)
+            ]
+            if not satisfied:
+                described = f"a test matching /{name_pattern}/"
+                extra = f" and decorated with {', '.join(also)}" if also else ""
+                if not candidates:
+                    failures.append(f"{relative} defines no {described}")
+                else:
+                    failures.append(
+                        f"{relative}: no single function is both {described} "
+                        f"and marked @pytest.mark.requirement({requirement!r})"
+                        f"{extra} — found {sorted(n.name for n in candidates)}, "
+                        f"marked {sorted(marked) or 'nothing'}. Marking a "
+                        "different function does not link this one"
+                    )
 
     passed = not failures
     if passed:

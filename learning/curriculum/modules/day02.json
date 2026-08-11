@@ -167,7 +167,8 @@
           "id": "v-fail-first",
           "validator": "pytest_check",
           "mandatory": true,
-          "description": "Run this IMMEDIATELY after writing the test, BEFORE editing simulator.py. This check passes only if tests/test_ping.py FAILS — that deliberate red is the evidence your test can see the missing behavior. If this check fails because the test passed, ping is either already implemented or your test asserts nothing; fix that before implementing.",
+          "historical": true,
+          "description": "Run this IMMEDIATELY after writing the test, BEFORE editing simulator.py. This check passes only if tests/test_ping.py FAILS — that deliberate red is the evidence your test can see the missing behavior. If this check fails because the test passed, ping is either already implemented or your test asserts nothing; fix that before implementing. Once it has passed, that result stands: implementing ping makes this test green, so re-running the check afterwards reports red — truthfully — without revoking the lesson. A red stage records something that happened, not something that has to stay true.",
           "args": {
             "nodeids": ["tests/test_ping.py"],
             "expect": "fail",

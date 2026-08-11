@@ -24,7 +24,7 @@ def test_progress_round_trip(tmp_path: Path) -> None:
     store = ProgressStore(path)
     store.mark_started("d1-import-no-side-effects")
     store.record_validation("d1-import-no-side-effects", "verify", True)
-    store.record_hint("d1-import-no-side-effects")
+    store.record_hint("d1-import-no-side-effects", 0)
 
     reloaded = ProgressStore(path)
     snapshot = reloaded.snapshot()
@@ -446,6 +446,72 @@ def test_passing_every_gate_is_not_the_same_as_finishing(tmp_path: Path) -> None
     assert store.mark_complete(lesson, curriculum)[0]
     assert store.completion_map(curriculum)[first] is True
     assert store.resume_lesson_id(curriculum) == second
+
+
+def test_revealing_the_same_hint_twice_spends_one_hint(tmp_path: Path) -> None:
+    """Two requests for one hint must not cost two.
+
+    A double-click, or a second open tab, sent index 0 twice; counting
+    requests spent two hints to reveal one, and the extra count silently
+    skipped the hint the learner never saw.
+    """
+    store = ProgressStore(tmp_path / "progress.json")
+
+    assert store.record_hint("d1-import-no-side-effects", 0) == 1
+    assert store.record_hint("d1-import-no-side-effects", 0) == 1
+    assert store.snapshot()["lessons"]["d1-import-no-side-effects"]["hints_used"] == 1
+
+    assert store.record_hint("d1-import-no-side-effects", 1) == 2
+    # Going back to an earlier hint does not un-reveal the later one.
+    assert store.record_hint("d1-import-no-side-effects", 0) == 2
+
+
+def test_a_red_stage_pass_survives_the_fix_that_makes_it_green(
+    tmp_path: Path,
+) -> None:
+    """Day 2's "the ping test must fail first" is an observation, not a rule.
+
+    It stops reproducing the moment the learner implements ping — which is the
+    lesson succeeding. Recording that re-run as a mandatory failure revoked the
+    completion it had just earned, and the only way to restore it was to delete
+    working code.
+    """
+    curriculum = load_curriculum(LEARNING_ROOT, validator_names())
+    lesson = curriculum.lessons["d2-add-ping-test-first"]
+    red_stage = next(b for b in lesson.blocks if b["id"] == "v-fail-first")
+    assert red_stage.get("historical"), "the lesson must flag this block"
+
+    store = ProgressStore(tmp_path / "progress.json")
+    for block in lesson.mandatory_validators():
+        store.record_validation(
+            lesson.id, block["id"], True, historical=bool(block.get("historical"))
+        )
+    for block_id in lesson.required_quiz_ids():
+        store.record_quiz(lesson.id, block_id, True, lesson.concepts)
+    for block_id in lesson.required_explain_ids():
+        store.record_explain(lesson.id, block_id, True, lesson.concepts)
+    store.mark_started(lesson.id)
+    store._state["lessons"][lesson.id]["status"] = "complete"  # noqa: SLF001
+
+    # The learner implements ping and re-runs the red-stage check: it is green
+    # now, so the expected-failure validator reports failure.
+    store.record_validation(lesson.id, "v-fail-first", False, historical=True)
+
+    assert store.validation_passed(lesson.id, "v-fail-first")
+    assert store.snapshot()["lessons"][lesson.id]["status"] == "complete"
+    # Prerequisites are not satisfied in this fixture, so check the gate
+    # itself rather than whole-lesson completion.
+    missing = store.lesson_completion(lesson, curriculum)[1]
+    assert not any("v-fail-first" in reason for reason in missing), missing
+
+    # An ordinary mandatory check still revokes.
+    other = next(
+        b["id"] for b in lesson.mandatory_validators() if b["id"] != "v-fail-first"
+    )
+    store.record_validation(lesson.id, other, False)
+    assert store.snapshot()["lessons"][lesson.id]["status"] == "in_progress"
+    missing = store.lesson_completion(lesson, curriculum)[1]
+    assert any(other in reason for reason in missing)
 
 
 def test_progress_file_is_written_atomically(tmp_path: Path) -> None:

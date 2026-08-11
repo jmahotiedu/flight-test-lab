@@ -190,11 +190,13 @@
           "id": "verify-source",
           "mandatory": true,
           "validator": "source_check",
-          "description": "Checks that your new test file actually uses parametrize and traces its cases to REQ-PROTO-001.",
+          "description": "Parses tests/test_build_response.py and requires one function to be both parametrized and marked REQ-PROTO-001. Checking those separately would accept a parametrized test sitting next to a marked one — two functions, no link — and searching the text would accept either word in a comment.",
           "args": {
             "file": "tests/test_build_response.py",
-            "must_contain": ["parametrize"],
-            "must_have_requirement_marker": "REQ-PROTO-001",
+            "must_mark_function": {
+              "requirement": "REQ-PROTO-001",
+              "also_decorated_with": ["parametrize"]
+            },
             "success_note": "tests/test_build_response.py parametrizes its cases and carries the REQ-PROTO-001 marker — traceable by construction."
           }
         },

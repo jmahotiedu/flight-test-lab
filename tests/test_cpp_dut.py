@@ -258,6 +258,7 @@ def test_cpp_dut_matches_python_on_raw_bytes(
 
 
 @pytest.mark.requirement("REQ-CPP-001")
+@pytest.mark.port_parity
 @pytest.mark.parametrize("command", COURSE_ADDED_COMMANDS)
 def test_course_added_commands_do_not_diverge(
     command: str, cpp_dut: int, python_dut: int
@@ -269,6 +270,12 @@ def test_course_added_commands_do_not_diverge(
     DUT that never grew those branches, so the divergence is checked directly.
     On an untouched checkout both reject the command identically and this
     passes; once one side implements it, this fails until the other does too.
+
+    That failure is the expected state for most of the course: Day 2 adds
+    `ping` and Day 11 ports it. It carries the `port_parity` marker so the
+    gates in between can run everything else -- without it, Day 10's
+    full-suite gate is unpassable on a checkout with a built C++ DUT, and
+    the lesson that fixes it sits behind that gate.
     """
     request = json.dumps({"command": command, "sequence": 1}, sort_keys=True)
     python_reply = _ask_raw(python_dut, request)

@@ -419,12 +419,16 @@ class LearningHandler(BaseHTTPRequestHandler):
         if not isinstance(index, int) or not 0 <= index < len(lesson.hints):
             self._send_error_json(HTTPStatus.BAD_REQUEST, "hint index out of range")
             return
-        self.server.progress.record_hint(lesson.id)
+        revealed = self.server.progress.record_hint(lesson.id, index)
         self._send_json(
             {
                 "level": lesson.hints[index]["level"],
                 "text": lesson.hints[index]["text"],
                 "total": len(lesson.hints),
+                # The authoritative count, so the client sets its position
+                # from the server instead of incrementing per response. Two
+                # replies to a double-click both say "1 revealed".
+                "revealed": revealed,
             }
         )
 
@@ -479,6 +483,12 @@ class LearningHandler(BaseHTTPRequestHandler):
                     "but nothing was verified, so the gate stays shut."
                 ),
             )
+        historical = bool(verify_block.get("historical", False))
+        already_seen = (
+            self.server.progress.validation_passed(lesson.id, str(block_id))
+            if historical
+            else False
+        )
         self.server.progress.record_validation(
             lesson.id,
             str(block_id),
@@ -488,8 +498,19 @@ class LearningHandler(BaseHTTPRequestHandler):
             # a missed concept would mark them weak on a topic because of a bug
             # in this codebase.
             concepts=() if crashed else lesson.concepts,
+            historical=historical,
         )
-        self._send_json(result.to_dict())
+        payload = result.to_dict()
+        if already_seen and not result.passed:
+            # Truthful on both counts: the run really did go red, and the
+            # earlier red-stage observation really does still count.
+            payload["interpretation"] = (
+                f"{result.interpretation}\n\nThis is a red-stage check: you "
+                "already recorded it passing, and that record stands. It stops "
+                "reproducing once the lesson's work is done — which is the "
+                "point — so your completion is not affected."
+            )
+        self._send_json(payload)
 
     def _handle_complete(self, body: dict[str, Any]) -> None:
         lesson = self._lesson_or_404(body.get("lesson_id"))

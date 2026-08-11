@@ -162,15 +162,21 @@ function renderFocus(lesson) {
     }
     const hintBtn = el("button", {}, `Hint (${Math.min(state.hintIndex + 1, lesson.hint_count)}/${lesson.hint_count})`);
     hintBtn.addEventListener("click", async () => {
-      if (state.hintIndex >= lesson.hint_count) return;
-      const { data } = await api.post("/api/hint", { lesson_id: lesson.id, index: state.hintIndex });
+      if (state.hintIndex >= lesson.hint_count || hintBtn.disabled) return;
+      // Disabled for the round trip: two clicks landing before the first
+      // reply used to advance the counter twice and skip the hint between.
+      hintBtn.disabled = true;
+      const asked = state.hintIndex;
+      const { data } = await api.post("/api/hint", { lesson_id: lesson.id, index: asked });
       if (data.text) {
-        state.hintIndex += 1;
+        // Position comes from the server's revealed count, not from a local
+        // increment, so a duplicate reply cannot move it twice.
+        state.hintIndex = typeof data.revealed === "number" ? data.revealed : asked + 1;
         hintZone.append(el("div", { class: "hint-box" }, el("b", {}, `Hint ${data.level}: `), data.text));
         hintBtn.textContent = state.hintIndex < lesson.hint_count
           ? `Hint (${state.hintIndex + 1}/${lesson.hint_count})` : "No more hints";
-        if (state.hintIndex >= lesson.hint_count) hintBtn.disabled = true;
       }
+      hintBtn.disabled = state.hintIndex >= lesson.hint_count;
     });
     if (state.hintIndex >= lesson.hint_count) { hintBtn.disabled = true; hintBtn.textContent = "No more hints"; }
     view.append(el("div", { class: "block" }, el("div", { class: "block-kind" }, "Stuck?"), hintBtn, hintZone));

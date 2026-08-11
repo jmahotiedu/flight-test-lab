@@ -218,9 +218,23 @@ class ProgressStore:
         *,
         mandatory: bool = True,
         concepts: tuple[str, ...] = (),
+        historical: bool = False,
     ) -> None:
         with self._lock:
             record = self._lesson_record_locked(lesson_id)
+            previous = record["validations"].get(block_id, {})
+            # A red-stage check records something that happened, not something
+            # that stays true: Day 2's "the ping test must fail first" stops
+            # reproducing the moment the learner implements ping — which is the
+            # lesson succeeding. Overwriting the observation would revoke the
+            # completion it earned, and the only way back would be to un-write
+            # working code. So the pass stands once it has been seen.
+            if historical and previous.get("passed") is True:
+                # Concepts are left alone too: a re-run of a check that has
+                # already served its purpose is evidence of nothing either way.
+                self._state["last_lesson_id"] = lesson_id
+                self._save_locked()
+                return
             record["validations"][block_id] = {"passed": passed, "at": _now()}
             # A mandatory validator's outcome is evidence about a concept,
             # exactly as a quiz answer is. Non-mandatory ones are excluded:
@@ -268,11 +282,22 @@ class ProgressStore:
             self._state["last_lesson_id"] = lesson_id
             self._save_locked()
 
-    def record_hint(self, lesson_id: str) -> None:
+    def record_hint(self, lesson_id: str, index: int) -> int:
+        """Reveal hint ``index``; return how many hints are now revealed.
+
+        Counting requests rather than hints made this non-idempotent: a
+        double-click, or two open tabs, spent two hints to reveal one — and
+        the extra count silently skipped a hint the learner never saw.  Hints
+        revealed is the high-water mark of the indices asked for, so asking
+        again for one already revealed changes nothing.
+        """
         with self._lock:
             record = self._lesson_record_locked(lesson_id)
-            record["hints_used"] += 1
-            self._save_locked()
+            revealed = max(int(record["hints_used"]), index + 1)
+            if revealed != record["hints_used"]:
+                record["hints_used"] = revealed
+                self._save_locked()
+            return revealed
 
     def record_interview(
         self, question_id: str, correct: bool, concepts: tuple[str, ...] = ()
@@ -425,6 +450,13 @@ class ProgressStore:
                 lesson_id: self._lesson_is_complete_locked(lesson_id, curriculum, set())
                 for lesson_id in curriculum.ordered_lesson_ids
             }
+
+    def validation_passed(self, lesson_id: str, block_id: str) -> bool:
+        """Has this block's check already been recorded as passing?"""
+        with self._lock:
+            record = self._state["lessons"].get(lesson_id, {})
+            outcome = record.get("validations", {}).get(block_id, {})
+            return bool(isinstance(outcome, dict) and outcome.get("passed") is True)
 
     def lesson_status(self, lesson: Lesson) -> str:
         with self._lock:

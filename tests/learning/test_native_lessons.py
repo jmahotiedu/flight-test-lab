@@ -66,9 +66,21 @@ NATIVE_BLOCKS = _verify_blocks()
     not _cpp_dut_built(),
     reason="cpp/build is not built; run cmake -S cpp -B cpp/build first",
 )
+# d11-port-your-commands asserts the post-port state: its checks fail from the
+# moment Day 2 adds `ping` to the Python DUT until that lesson ports it. Same
+# marker as the parity test itself, so gates that run before Day 11 can exclude
+# the whole set rather than each half of it.
 @pytest.mark.parametrize(
     "block",
-    [block for _, block in NATIVE_BLOCKS],
+    [
+        pytest.param(
+            block,
+            marks=pytest.mark.port_parity
+            if name.startswith("d11-port-your-commands:")
+            else (),
+        )
+        for name, block in NATIVE_BLOCKS
+    ],
     ids=[name for name, _ in NATIVE_BLOCKS] or ["none"],
 )
 def test_native_lesson_validator_passes(block: dict[str, Any]) -> None:

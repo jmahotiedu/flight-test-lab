@@ -398,12 +398,12 @@ def test_requirement_marker_must_be_a_real_decorator(tmp_path: Path) -> None:
         "source_check",
         {
             "file": str(decoy),
-            "must_have_requirement_marker": "REQ-PROTO-001",
+            "must_mark_function": {"requirement": "REQ-PROTO-001"},
         },
         ValidatorContext(repo_root=tmp_path),
     )
     assert not result.passed
-    assert "no test function decorated" in result.interpretation
+    assert "does not link this one" in result.interpretation
 
     real = tmp_path / "test_real.py"
     real.write_text(
@@ -415,7 +415,7 @@ def test_requirement_marker_must_be_a_real_decorator(tmp_path: Path) -> None:
     )
     ok = run_validator(
         "source_check",
-        {"file": str(real), "must_have_requirement_marker": "REQ-PROTO-001"},
+        {"file": str(real), "must_mark_function": {"requirement": "REQ-PROTO-001"}},
         ValidatorContext(repo_root=tmp_path),
     )
     assert ok.passed, ok.interpretation
@@ -451,8 +451,10 @@ def test_requirement_marker_accepts_the_parametrize_idiom(tmp_path: Path) -> Non
         "source_check",
         {
             "file": str(taught),
-            "must_contain": ["parametrize"],
-            "must_have_requirement_marker": "REQ-PROTO-001",
+            "must_mark_function": {
+                "requirement": "REQ-PROTO-001",
+                "also_decorated_with": ["parametrize"],
+            },
         },
         ValidatorContext(repo_root=tmp_path),
     )
@@ -846,6 +848,68 @@ SEQUENCE_ECHO_TEST = """import pytest
     assert response["sequence"] == 42
 """
 
+DECOY_PLUS_MAPPED_TEST = """import pytest
+
+
+@pytest.mark.requirement("REQ-LEARN-001")
+def test_unrelated():
+    assert True
+
+
+def test_sequence_echo_on_status_response(lab_client):
+    response = lab_client.request({"command": "status", "sequence": 42})
+    assert response["sequence"] == 42
+"""
+
+PARAMETRIZED_BUT_UNMARKED = """import pytest
+
+
+@pytest.mark.requirement("REQ-PROTO-001")
+def test_something_else():
+    assert True
+
+
+@pytest.mark.parametrize("case", [1, 2])
+def test_build_response_error_cases(case):
+    assert case
+"""
+
+
+def test_parametrize_and_marker_must_be_on_the_same_function(tmp_path: Path) -> None:
+    """Day 5's gate checked both conditions, but not that they met.
+
+    A parametrized test beside a marked one satisfies "the file parametrizes"
+    and "the file marks REQ-PROTO-001" while the parametrized cases trace to
+    nothing.
+    """
+    target = tmp_path / "test_build_response.py"
+    target.write_text(PARAMETRIZED_BUT_UNMARKED, encoding="utf-8")
+    result = run_validator(
+        "source_check",
+        {
+            "file": str(target),
+            "must_mark_function": {
+                "requirement": "REQ-PROTO-001",
+                "also_decorated_with": ["parametrize"],
+            },
+        },
+        ValidatorContext(repo_root=tmp_path),
+    )
+    assert not result.passed
+    assert "does not link this one" in result.interpretation
+
+
+def test_the_removed_marker_argument_fails_loudly(tmp_path: Path) -> None:
+    """A renamed gate argument must not silently become a no-op."""
+    target = tmp_path / "test_thing.py"
+    target.write_text("def test_thing():\n    assert True\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="must_mark_function"):
+        run_validator(
+            "source_check",
+            {"file": str(target), "must_have_requirement_marker": "REQ-PROTO-001"},
+            ValidatorContext(repo_root=tmp_path),
+        )
+
 
 @pytest.fixture()
 def sequence_echo_module() -> Iterator[Path]:
@@ -880,11 +944,40 @@ def test_the_traceability_lesson_requires_a_real_marker(
         "source_check",
         {
             "file": str(sequence_echo_module.relative_to(REPO_ROOT).as_posix()),
-            "must_have_requirement_marker": "REQ-LEARN-001",
+            "must_mark_function": {
+                "name": "sequence_echo",
+                "requirement": "REQ-LEARN-001",
+            },
         },
         CONTEXT,
     )
     assert result.passed is expected, result.interpretation
+
+
+def test_the_marker_must_sit_on_the_test_the_other_gates_match(
+    sequence_echo_module: Path,
+) -> None:
+    """A marked bystander does not link the mapped test.
+
+    The traceability row and the JUnit gate both match the function whose name
+    contains sequence_echo. Accepting any marked function in the file let a
+    marked test_unrelated satisfy the marker while the test those two gates
+    actually check carried no requirement link at all.
+    """
+    sequence_echo_module.write_text(DECOY_PLUS_MAPPED_TEST, encoding="utf-8")
+    result = run_validator(
+        "source_check",
+        {
+            "file": str(sequence_echo_module.relative_to(REPO_ROOT).as_posix()),
+            "must_mark_function": {
+                "name": "sequence_echo",
+                "requirement": "REQ-LEARN-001",
+            },
+        },
+        CONTEXT,
+    )
+    assert not result.passed
+    assert "does not link this one" in result.interpretation
 
 
 DUT_CONFIG_SPEC = {"dut_config": {"object": {"host": "string", "port": "port"}}}

@@ -107,6 +107,58 @@ def test_only_one_dut_fixture_is_built_for_those_files() -> None:
     assert len(builds) == 1, f"expected one session DUT, saw {len(builds)}: {builds}"
 
 
+def test_no_gate_before_day_11_can_demand_a_ported_command() -> None:
+    """Day 2 adds `ping` to the Python DUT; Day 11 ports it to the C++ one.
+
+    Between those lessons the two DUTs genuinely disagree, and on a checkout
+    with a built C++ DUT any earlier gate that runs the whole suite fails —
+    including Day 10's, which sits in front of the lesson that fixes it. That
+    is a deadlock, so every full-suite gate before Day 11 has to exclude the
+    port_parity marker.
+    """
+    curriculum = load_curriculum(LEARNING_ROOT, validator_names())
+    offenders = []
+    for lesson in curriculum.lessons.values():
+        if lesson.day >= 11:
+            continue
+        for block in lesson.blocks:
+            if block["type"] != "verify" or not block.get("mandatory"):
+                continue
+            args = block.get("args", {})
+            snippet = str(args.get("snippet", ""))
+            runs_everything = "'pytest'" in snippet and "-q" in snippet
+            nodeids = [str(n) for n in args.get("nodeids", [])]
+            runs_everything = runs_everything or any(
+                n.rstrip("/") in ("tests", ".") for n in nodeids
+            )
+            if runs_everything and "not port_parity" not in snippet:
+                offenders.append(f"{lesson.id}:{block['id']}")
+    assert not offenders, (
+        f"these gates run the full suite before Day 11 without excluding "
+        f"port_parity, so they deadlock a learner with a built C++ DUT: "
+        f"{offenders}"
+    )
+
+
+def test_the_parity_check_that_stages_around_the_course_is_marked() -> None:
+    """The exclusion above is only meaningful if the marker is applied."""
+    source = (REPO_ROOT / "tests" / "test_cpp_dut.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    target = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "test_course_added_commands_do_not_diverge"
+    )
+    marks = {
+        node.attr
+        for decorator in target.decorator_list
+        for node in ast.walk(decorator)
+        if isinstance(node, ast.Attribute)
+    }
+    assert "port_parity" in marks
+
+
 TEARDOWN_PROBE = """
 import pytest
 

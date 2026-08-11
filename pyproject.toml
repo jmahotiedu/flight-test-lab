@@ -35,6 +35,7 @@ addopts = "-ra --strict-markers"
 testpaths = ["tests"]
 markers = [
     "requirement(identifier): links a test to a software requirement",
+    "port_parity: cross-DUT parity for commands the course has you add (fails between Day 2 and Day 11 by design)",
 ]
 
 [tool.ruff]
