@@ -49,7 +49,12 @@ def _record_is_valid(section: str, record: dict[str, Any]) -> bool:
     integer_fields: tuple[str, ...]
     list_fields: tuple[str, ...] = ()
     if section == "lessons":
-        integer_fields = ("attempts", "hints_used", "quiz_attempts")
+        integer_fields = (
+            "attempts",
+            "hints_used",
+            "quiz_attempts",
+            "interview_baseline",
+        )
         list_fields = ("steps_done", "quiz_correct", "explain_done")
     elif section == "concepts":
         integer_fields = ("correct", "incorrect")
@@ -116,11 +121,12 @@ class ProgressStore:
             return _empty_state()
         try:
             data = json.loads(self._path.read_text(encoding="utf-8"))
-        # UnicodeDecodeError is neither an OSError nor a JSONDecodeError, so a
-        # progress file with a truncated multi-byte sequence — the shape a
-        # crash mid-write leaves behind — would otherwise take down the server
-        # at import instead of taking the documented reset path.
-        except (json.JSONDecodeError, OSError, UnicodeError):
+        # Every way json.loads can fail. JSONDecodeError and UnicodeDecodeError
+        # are ValueError subclasses, as is the oversized-integer error CPython
+        # raises past its digit limit; deep nesting raises RecursionError,
+        # which is not. Any of them escaping here means `python -m learning`
+        # cannot start at all, and the documented backup-and-reset never runs.
+        except (OSError, ValueError, RecursionError):
             self._backup_locked()
             return _empty_state()
         if not isinstance(data, dict) or data.get("version") != STATE_VERSION:
@@ -182,6 +188,7 @@ class ProgressStore:
             "explain_done": [],
             "attempts": 0,
             "hints_used": 0,
+            "interview_baseline": 0,
             "started_at": None,
             "completed_at": None,
         }
@@ -197,11 +204,28 @@ class ProgressStore:
             record.setdefault(key, default)
         return record
 
+    def _interview_total_locked(self) -> int:
+        total = 0
+        for entry in self._state["interview"].values():
+            if not isinstance(entry, dict):
+                continue
+            for key in ("correct", "incorrect"):
+                value = entry.get(key, 0)
+                if isinstance(value, int) and not isinstance(value, bool):
+                    total += value
+        return total
+
     def mark_started(self, lesson_id: str) -> None:
         with self._lock:
             record = self._lesson_record_locked(lesson_id)
             if record["started_at"] is None:
                 record["started_at"] = _now()
+                # A lifetime total cannot show that a drill happened *here*:
+                # Interview mode is open from day one, so a learner who used
+                # it earlier would satisfy Day 14's "answer five questions"
+                # before opening the lesson. Snapshot the count on first
+                # entry and measure from there.
+                record["interview_baseline"] = self._interview_total_locked()
             if record["status"] == "not_started":
                 record["status"] = "in_progress"
             record["attempts"] += 1

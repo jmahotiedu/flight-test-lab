@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import re
 import socket
 import subprocess
 import tempfile
@@ -239,8 +240,6 @@ def run(args: dict[str, Any], context: ValidatorContext) -> CheckResult:
                         connection, steps, response_timeout
                     )
             if isinstance(log_expect, str):
-                import re
-
                 time.sleep(0.2)  # allow the file handler to flush
                 log_text = (
                     log_path.read_text(encoding="utf-8", errors="replace")
@@ -277,13 +276,48 @@ def run(args: dict[str, Any], context: ValidatorContext) -> CheckResult:
             f"expected DUT exit code {expect_early_exit}, got {exit_status}"
         )
 
-    passed = not failures
-    if passed:
-        interpretation = str(
-            args.get("success_note", "DUT behaved exactly as expected.")
-        )
+    observed_failure = bool(failures)
+    # expect_failure inverts the verdict the way pytest_check's expect: "fail"
+    # does. A symptom demonstration is *supposed* to go red: the learner has
+    # to produce the failure and read it, and a check that can only be
+    # non-mandatory (because it always fails) gates nothing at all — the
+    # capstone could be completed without ever running the experiment it is
+    # about.
+    if bool(args.get("expect_failure", False)):
+        # Red is not enough: it has to be red for the *stated* reason. Without
+        # this, running the probe with no fault at all still "passed", on the
+        # strength of the missing fault_injected log line — a different
+        # failure entirely, and one that proves the fault never engaged.
+        wanted = args.get("expect_failure_matches")
+        detail = "; ".join(failures)
+        matched = not isinstance(wanted, str) or bool(re.search(wanted, detail))
+        passed = observed_failure and matched
+        if passed:
+            interpretation = str(
+                args.get(
+                    "success_note",
+                    f"The symptom reproduced, which is the point: {detail}",
+                )
+            )
+        elif not observed_failure:
+            interpretation = (
+                "Check failed: this run was supposed to reproduce the fault "
+                "and did not — the DUT behaved normally, so there is no "
+                "symptom to diagnose. Check the fault arguments."
+            )
+        else:
+            interpretation = (
+                f"Check failed: the run went red for the wrong reason. "
+                f"Expected a failure matching /{wanted}/, got: {detail}"
+            )
     else:
-        interpretation = "Check failed: " + "; ".join(failures)
+        passed = not observed_failure
+        if passed:
+            interpretation = str(
+                args.get("success_note", "DUT behaved exactly as expected.")
+            )
+        else:
+            interpretation = "Check failed: " + "; ".join(failures)
 
     return CheckResult(
         name="behavior_probe",

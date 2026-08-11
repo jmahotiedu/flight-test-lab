@@ -406,3 +406,66 @@ def test_process_termination_fault_exits_after_the_configured_requests(
 
     log_text = dut.log_path.read_text(encoding="utf-8")
     assert "fault_injected fault=process_termination" in log_text
+
+
+@pytest.mark.requirement("REQ-FAULT-001")
+@pytest.mark.parametrize(
+    ("label", "payload"),
+    [
+        # Both are syntactically valid JSON that json.loads refuses to decode:
+        # CPython caps integer-string conversion, and deep nesting raises
+        # RecursionError, which is not a ValueError at all. Each used to end
+        # the run with a traceback instead of the usual one-line diagnostic.
+        ("oversized integer", '{"response_delay_ms": ' + "1" * 5000 + "}"),
+        ("deep nesting", '{"response_delay_ms": ' + "[" * 2000 + "]" * 2000 + "}"),
+    ],
+)
+def test_undecodable_fault_configs_are_cli_errors(
+    tmp_path: Path, label: str, payload: str
+) -> None:
+    from simulator.simulator import load_fault_config
+
+    path = tmp_path / "fault.json"
+    path.write_text(payload, encoding="utf-8")
+    with pytest.raises(SystemExit, match="--fault-config: cannot read"):
+        load_fault_config(path)
+
+
+@pytest.mark.requirement("REQ-FAULT-001")
+def test_a_delay_the_platform_cannot_represent_is_rejected(tmp_path: Path) -> None:
+    """time.sleep() raises OverflowError on a large-but-valid integer.
+
+    In the request path that means the client gets no response while the log
+    already claims fault_injected — a fault that reports itself as injected
+    and then does something else is the one thing a fault injector must not do.
+    """
+    from simulator.simulator import MAX_DELAY_MS, load_fault_config
+
+    path = tmp_path / "fault.json"
+    path.write_text(json.dumps({"response_delay_ms": 2**63}), encoding="utf-8")
+    with pytest.raises(SystemExit, match="at most"):
+        load_fault_config(path)
+
+    path.write_text(json.dumps({"response_delay_ms": MAX_DELAY_MS}), encoding="utf-8")
+    assert load_fault_config(path).response_delay_ms == MAX_DELAY_MS
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "simulator.simulator",
+            "--port",
+            "9098",
+            "--fault",
+            "delayed_response",
+            "--fault-delay-ms",
+            str(2**63),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+        cwd=str(REPO_ROOT),
+    )
+    assert result.returncode != 0
+    assert "at most" in (result.stderr or result.stdout)

@@ -12,6 +12,7 @@
 #include <ws2tcpip.h>
 #else
 #include <arpa/inet.h>
+#include <netdb.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -76,7 +77,14 @@ void trigger_hang() {
 // Applies whichever fault is configured once the request counter reaches
 // fault_after.  Returns true when the caller should skip its normal reply.
 bool maybe_inject_fault(const ServerOptions& options, int request_number) {
-  if (options.fault == Fault::None || request_number < options.fault_after) {
+  // Equality, not >=. The option is documented as "fire the fault on request
+  // N", and >= turned `--fault slow --fault-after 2` into every request from
+  // the second onwards being slow — measured 422, 406, 405 ms for requests
+  // 2, 3 and 4. A fault injector that keeps firing is not producing the one
+  // controlled event an experiment is built around. With --fault-after 0 the
+  // startup call passes 0 and requests start at 1, so it also stops repeating
+  // there.
+  if (options.fault == Fault::None || request_number != options.fault_after) {
     return false;
   }
   switch (options.fault) {
@@ -256,9 +264,23 @@ int run_server(const ServerOptions& options, std::atomic<bool>& stop_requested) 
   sockaddr_in address{};
   address.sin_family = AF_INET;
   address.sin_port = htons(static_cast<unsigned short>(options.port));
+  // inet_pton takes numeric literals only, so `--host localhost` bound fine
+  // under the Python DUT and failed here — the same harness configuration
+  // working or not depending on which implementation it pointed at, which is
+  // the one thing a second implementation must not introduce.
   if (::inet_pton(AF_INET, options.host.c_str(), &address.sin_addr) != 1) {
-    log_message(Level::Error, "invalid_host host=" + options.host);
-    return 1;
+    addrinfo hints{};
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    addrinfo* resolved = nullptr;
+    if (::getaddrinfo(options.host.c_str(), nullptr, &hints, &resolved) != 0 ||
+        resolved == nullptr) {
+      log_message(Level::Error, "invalid_host host=" + options.host);
+      return 1;
+    }
+    address.sin_addr =
+        reinterpret_cast<sockaddr_in*>(resolved->ai_addr)->sin_addr;
+    ::freeaddrinfo(resolved);
   }
 
   if (::bind(listener.get(), reinterpret_cast<sockaddr*>(&address),

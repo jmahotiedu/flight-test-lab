@@ -37,9 +37,8 @@
           "type": "verify",
           "id": "v-symptom",
           "validator": "behavior_probe",
-          "mandatory": false,
-          "expect_failure": true,
-          "description": "EXPECTED TO GO RED. The DUT is launched with an injected fault: --fault delayed_response --fault-delay-ms 400, which delays every response by 400 ms — over the 250 ms REQ-COM-002 budget. Run it, then read the red transcript: the response line shows ~400 ms elapsed against the 250 ms budget, and the DUT log expectation (fault_injected) tells you the delay was configured, not organic. This failing run is the symptom evidence for your diagnosis.",
+          "mandatory": true,
+          "description": "EXPECTED TO GO RED. The DUT is launched with an injected fault: --fault delayed_response --fault-delay-ms 400, which delays every response by 400 ms — over the 250 ms REQ-COM-002 budget. Run it, then read the red transcript: the response line shows ~400 ms elapsed against the 250 ms budget, and the DUT log expectation (fault_injected) tells you the delay was configured, not organic. This failing run is the symptom evidence for your diagnosis. Mandatory, and expected to go red: expect_failure inverts the verdict, so the gate passes when the symptom reproduces. Left non-mandatory it gated nothing — the capstone could be certified without ever running the experiment it is about.",
           "args": {
             "dut_args": [
               "--fault",
@@ -59,7 +58,9 @@
                 "max_elapsed_ms": 250
               }
             ],
-            "log_expect_regex": "fault_injected"
+            "log_expect_regex": "fault_injected",
+            "expect_failure": true,
+            "expect_failure_matches": "over the 250 ms budget"
           }
         },
         {
@@ -169,6 +170,7 @@
           "description": "Counts the interview answers recorded in your progress state. The objective of this lesson is the drill itself, so completion has to depend on it having happened.",
           "args": {
             "min_interview_answers": 5,
+            "since_lesson": "d14-interview-drill",
             "success_note": "Five or more interview answers are on record — the drill happened, and the concept weights it produced are what the explain block below asks you to read."
           }
         },

@@ -68,7 +68,14 @@ int main(int argc, char** argv) {
   const std::vector<std::string> args(argv + 1, argv + argc);
   for (std::size_t i = 0; i < args.size(); ++i) {
     const std::string& flag = args[i];
-    const bool has_value = i + 1 < args.size();
+    // "another token exists" is not "a value was given": `--log-file
+    // --verbose` used to start a non-verbose server writing to a file named
+    // "--verbose", which is a silent misconfiguration rather than the usage
+    // error it plainly is. A value that looks like an option is treated as a
+    // missing value, matching argparse.
+    const bool looks_like_flag =
+        i + 1 < args.size() && args[i + 1].rfind("--", 0) == 0;
+    const bool has_value = i + 1 < args.size() && !looks_like_flag;
 
     if (flag == "-h" || flag == "--help") {
       print_usage();
@@ -102,6 +109,14 @@ int main(int argc, char** argv) {
         std::cerr << "--fault-delay-ms must be an integer\n";
         return 2;
       }
+    } else if (flag == "--host" || flag == "--port" || flag == "--log-file" ||
+               flag == "--fault" || flag == "--fault-after" ||
+               flag == "--fault-delay-ms") {
+      // Reached only when the option is known but its value is missing or is
+      // another option. Saying "unrecognised argument: --log-file" would send
+      // the reader looking for a typo that is not there.
+      std::cerr << flag << " requires a value\n";
+      return 2;
     } else {
       std::cerr << "unrecognised argument: " << flag << "\n";
       return 2;

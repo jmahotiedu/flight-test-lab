@@ -150,13 +150,49 @@ def test_validate_returns_structured_failure(server: LearningServer) -> None:
 
 
 def test_complete_refused_without_validation(server: LearningServer) -> None:
-    _request(server, "GET", "/api/lesson/d1-main-entrypoint")
+    # Entering a lesson is a POST now: the GET is read-only, so it no longer
+    # creates the record this assertion reads.
+    _request(server, "POST", "/api/start", {"lesson_id": "d1-main-entrypoint"})
     status, data = _request(
         server, "POST", "/api/complete", {"lesson_id": "d1-main-entrypoint"}
     )
     assert status == 409
     assert data["complete"] is False
     assert any("validation" in item for item in data["missing"])
+
+
+def test_reading_a_lesson_does_not_touch_progress(server: LearningServer) -> None:
+    """A GET with no unusual header is a request any page can make.
+
+    It cannot read the reply cross-origin, but a GET that writes does not need
+    to be read to do damage: this one used to bump attempts, set status and
+    rewrite the progress file, so a page in another tab could scribble over a
+    learner's record.
+    """
+    for _ in range(3):
+        status, _ = _request(server, "GET", "/api/lesson/d1-import-no-side-effects")
+        assert status == 200
+
+    assert server.progress.snapshot()["lessons"] == {}
+
+    started, _ = _request(
+        server, "POST", "/api/start", {"lesson_id": "d1-import-no-side-effects"}
+    )
+    assert started == 200
+    record = server.progress.snapshot()["lessons"]["d1-import-no-side-effects"]
+    assert record["status"] == "in_progress"
+    assert record["attempts"] == 1
+
+
+def test_starting_a_lesson_is_same_origin_protected(server: LearningServer) -> None:
+    status, data = _raw_post(
+        server,
+        {"Content-Type": "text/plain", "Origin": "http://evil.example"},
+        path="/api/start",
+    )
+    assert status == 403
+    assert server.progress.snapshot()["lessons"] == {}
+    assert "application/json" in data["error"]
 
 
 def test_hint_endpoint_is_progressive(server: LearningServer) -> None:

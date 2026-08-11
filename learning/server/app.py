@@ -240,7 +240,9 @@ class LearningHandler(BaseHTTPRequestHandler):
         if body is None:
             self._send_error_json(HTTPStatus.BAD_REQUEST, "invalid JSON body")
             return
-        if path == "/api/step":
+        if path == "/api/start":
+            self._handle_start(body)
+        elif path == "/api/step":
             self._handle_step(body)
         elif path == "/api/hint":
             self._handle_hint(body)
@@ -385,12 +387,29 @@ class LearningHandler(BaseHTTPRequestHandler):
         self._send_json({"concepts": list(curriculum.concepts), "days": days})
 
     def _handle_lesson(self, lesson_id: str) -> None:
+        """Read-only.  Entry is recorded by POST /api/start.
+
+        A GET with no unusual header is a "simple request": any page can make
+        one cross-origin without a preflight.  It cannot read the reply, but a
+        GET that writes does not need to be read to do damage — this one used
+        to bump attempts, set status and rewrite the progress file, so a page
+        left open in another tab could scribble over a learner's record and
+        mark lessons started that they never opened.
+        """
         lesson = self.server.curriculum.lessons.get(unquote(lesson_id))
         if lesson is None:
             self._send_error_json(HTTPStatus.NOT_FOUND, f"unknown lesson {lesson_id!r}")
             return
-        if lesson.status == "available":
-            self.server.progress.mark_started(lesson.id)
+        self._send_json(self._lesson_public(lesson))
+
+    def _handle_start(self, body: dict[str, Any]) -> None:
+        lesson = self._lesson_or_404(body.get("lesson_id"))
+        if lesson is None:
+            return
+        if lesson.status != "available":
+            self._send_error_json(HTTPStatus.CONFLICT, "lesson is unavailable")
+            return
+        self.server.progress.mark_started(lesson.id)
         self._send_json(self._lesson_public(lesson))
 
     def _handle_mastery(self) -> None:

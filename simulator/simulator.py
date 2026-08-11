@@ -32,6 +32,13 @@ MAX_NESTING_DEPTH = 100
 # (cpp/src/json.cpp, kMaxIntDigits) enforces the same number.
 MAX_INT_DIGITS = 4300
 
+# Upper bound for any injected delay.  time.sleep() raises OverflowError on a
+# large-but-valid integer, which in the request path means the client gets no
+# response at all while the log already claims fault_injected — a fault that
+# reports itself as injected and then does something else is the one thing a
+# fault injector must never do.  A day is far beyond any test's patience.
+MAX_DELAY_MS = 86_400_000
+
 
 @dataclass(frozen=True, slots=True)
 class FaultConfig:
@@ -71,11 +78,13 @@ def load_fault_config(path: Path) -> FaultConfig:
     """Load a fault configuration from a JSON file."""
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    # UnicodeDecodeError is a ValueError, not an OSError, and json never sees
-    # the file when decoding fails — so without UnicodeError here a config
-    # saved in the wrong encoding ends the run with a traceback instead of the
-    # same one-line diagnostic every other malformed config gets.
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+    # Every way json.loads can fail, not just the obvious one. JSONDecodeError
+    # and UnicodeDecodeError are both ValueError subclasses; so is the
+    # oversized-integer error CPython raises past its digit limit. Deep nesting
+    # raises RecursionError, which is not a ValueError at all. Each of these
+    # used to end the run with a traceback instead of the same one-line
+    # diagnostic every other malformed config gets.
+    except (OSError, ValueError, RecursionError) as exc:
         raise SystemExit(f"--fault-config: cannot read {path}: {exc}") from exc
     if not isinstance(data, dict):
         raise SystemExit("--fault-config must contain a JSON object")
@@ -104,6 +113,11 @@ def load_fault_config(path: Path) -> FaultConfig:
             raise SystemExit(f"--fault-config: {key} must be an integer, got {value!r}")
         if value < 0:
             raise SystemExit(f"--fault-config: {key} must not be negative")
+        if key.endswith("_ms") and value > MAX_DELAY_MS:
+            raise SystemExit(
+                f"--fault-config: {key} must be at most {MAX_DELAY_MS} ms "
+                "(24 hours); larger values overflow time.sleep()"
+            )
         return value
 
     # A count of zero is ambiguous — "disabled" by the manifest's own
@@ -147,6 +161,11 @@ def resolve_fault_config(args: argparse.Namespace) -> FaultConfig:
     # other.
     if delay < 0:
         raise SystemExit("--fault-delay-ms must not be negative")
+    if delay > MAX_DELAY_MS:
+        raise SystemExit(
+            f"--fault-delay-ms must be at most {MAX_DELAY_MS} ms (24 hours); "
+            "larger values overflow time.sleep()"
+        )
     # Zero is equally useless for the two timing presets: both runtime guards
     # are `> 0`, so the fault would neither delay anything nor log
     # fault_injected, and the run would look like a clean experiment that

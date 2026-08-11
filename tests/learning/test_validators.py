@@ -1278,3 +1278,51 @@ def test_a_real_dut_config_still_passes(tmp_path: Path) -> None:
         ValidatorContext(repo_root=tmp_path),
     )
     assert result.passed, result.interpretation
+
+
+CAPSTONE_SYMPTOM = {
+    "dut_args": ["--fault", "delayed_response", "--fault-delay-ms", "400"],
+    "steps": [
+        {
+            "send": {"command": "status", "sequence": 1},
+            "expect": {"state": "READY"},
+            "max_elapsed_ms": 250,
+        }
+    ],
+    "log_expect_regex": "fault_injected",
+    "expect_failure": True,
+    "expect_failure_matches": "over the 250 ms budget",
+}
+
+
+def test_a_symptom_probe_passes_only_when_the_symptom_reproduces() -> None:
+    """The capstone's red run has to be a gate, and red for the right reason.
+
+    Left non-mandatory it gated nothing, so the capstone could be certified
+    without ever running the experiment. Made mandatory, it still has to
+    distinguish the stated symptom from any other failure: without the fault
+    arguments the probe also goes red — on the missing fault_injected log line,
+    which proves the fault never engaged.
+    """
+    with_fault = run_validator("behavior_probe", CAPSTONE_SYMPTOM, CONTEXT)
+    assert with_fault.passed, with_fault.interpretation
+    assert "reproduced" in with_fault.interpretation
+
+    without_fault = dict(CAPSTONE_SYMPTOM)
+    without_fault.pop("dut_args")
+    result = run_validator("behavior_probe", without_fault, CONTEXT)
+    assert not result.passed
+    assert "wrong reason" in result.interpretation
+
+
+def test_an_ordinary_probe_is_unaffected_by_the_new_flag() -> None:
+    clean = {
+        "steps": [
+            {
+                "send": {"command": "status", "sequence": 1},
+                "expect": {"state": "READY"},
+                "max_elapsed_ms": 250,
+            }
+        ]
+    }
+    assert run_validator("behavior_probe", clean, CONTEXT).passed

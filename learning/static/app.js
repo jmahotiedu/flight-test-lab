@@ -92,7 +92,14 @@ async function refreshTopbar() {
 /* ---------- focus view ---------- */
 
 async function loadLesson(lessonId) {
-  const lesson = await api.get("/api/lesson/" + encodeURIComponent(lessonId));
+  // Opening a lesson is a state change, so it goes through a POST the
+  // same-origin guard covers. The GET stays read-only; falling back to it
+  // means an unavailable lesson still renders (with its reason) instead of
+  // showing nothing.
+  const started = await api.post("/api/start", { lesson_id: lessonId });
+  const lesson = started.ok
+    ? started.data
+    : await api.get("/api/lesson/" + encodeURIComponent(lessonId));
   state.lesson = lesson;
   state.hintIndex = lesson.progress.hints_used || 0;
   renderFocus(lesson);

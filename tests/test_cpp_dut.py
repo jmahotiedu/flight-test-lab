@@ -164,6 +164,22 @@ def _wait_ready(host: str, port: int, deadline_seconds: float = 10.0) -> None:
         client.close()
 
 
+def _wait_for_accept(host: str, port: int, deadline_seconds: float = 10.0) -> None:
+    """Wait until the port accepts, without sending anything.
+
+    wait_until_ready sends status requests, which the DUT counts — so it
+    cannot be used to reach a known request number.
+    """
+    deadline = time.monotonic() + deadline_seconds
+    while time.monotonic() < deadline:
+        try:
+            with socket.create_connection((host, port), timeout=0.2):
+                return
+        except OSError:
+            time.sleep(0.05)
+    raise AssertionError(f"port {port} never accepted a connection")
+
+
 def _start(argv: list[str]) -> subprocess.Popen[str]:
     return subprocess.Popen(
         argv,
@@ -190,6 +206,17 @@ def _ask_raw(port: int, request: str, timeout: float = 5.0) -> str:
         sock.settimeout(timeout)
         sock.sendall(request.encode("utf-8") + b"\n")
         return sock.makefile("rb").readline().decode("utf-8").rstrip("\n")
+
+
+@pytest.fixture()
+def cpp_dut_binary() -> Path:
+    """The built binary, for tests that need their own DUT arguments."""
+    binary = cpp_dut_path()
+    if binary is None:
+        pytest.skip(
+            "C++ DUT not built: cmake -S cpp -B cpp/build && cmake --build cpp/build"
+        )
+    return binary
 
 
 @pytest.fixture(scope="module")
@@ -618,3 +645,93 @@ def test_cpp_dut_writes_the_same_evidence_lines(
     # Same field layout as the Python DUT: an evidence parser written for one
     # must work on the other.
     assert " level=INFO message=" in text
+
+
+@pytest.mark.requirement("REQ-CPP-001")
+def test_cpp_dut_fires_a_nonterminal_fault_once(cpp_dut_binary: Path) -> None:
+    """--fault-after N means "on request N", not "from request N onwards".
+
+    Measured before the fix: requests 2, 3 and 4 all took ~400 ms. A fault
+    injector that keeps firing is not producing the one controlled event an
+    experiment is built around.
+    """
+    port = reserve_local_port()
+    process = _start(
+        [
+            str(cpp_dut_binary),
+            "--host",
+            "127.0.0.1",
+            "--port",
+            str(port),
+            "--fault",
+            "slow",
+            "--fault-after",
+            "2",
+            "--fault-delay-ms",
+            "400",
+        ]
+    )
+    try:
+        # Wait by connecting, not by asking: wait_until_ready sends status
+        # requests, and those count. Measured [405, 0, 0, 0] the first time —
+        # the readiness probe had consumed request 1 and the fault fired
+        # correctly on request 2.
+        _wait_for_accept("127.0.0.1", port)
+        elapsed = []
+        with socket.create_connection(("127.0.0.1", port), timeout=10) as connection:
+            reader = connection.makefile("rb")
+            for sequence in range(1, 5):
+                started = time.monotonic()
+                request = json.dumps(
+                    {"command": "status", "sequence": sequence}, sort_keys=True
+                )
+                connection.sendall(request.encode() + b"\n")
+                reader.readline()
+                elapsed.append(int((time.monotonic() - started) * 1000))
+    finally:
+        _stop(process)
+
+    assert elapsed[0] < 250, elapsed
+    assert elapsed[1] >= 350, elapsed
+    assert all(value < 250 for value in elapsed[2:]), (
+        f"the fault fired more than once: {elapsed}"
+    )
+
+
+@pytest.mark.requirement("REQ-CPP-001")
+def test_cpp_dut_accepts_a_hostname(cpp_dut_binary: Path) -> None:
+    """The Python DUT binds `--host localhost`; so must this one.
+
+    inet_pton takes numeric literals only, so the same harness configuration
+    worked or failed depending on which implementation it pointed at.
+    """
+    port = reserve_local_port()
+    process = _start([str(cpp_dut_binary), "--host", "localhost", "--port", str(port)])
+    try:
+        _wait_ready("127.0.0.1", port)
+        assert process.poll() is None
+    finally:
+        _stop(process)
+
+
+@pytest.mark.requirement("REQ-CPP-001")
+@pytest.mark.parametrize("flag", ["--log-file", "--host", "--fault"])
+def test_cpp_dut_rejects_an_option_missing_its_value(
+    cpp_dut_binary: Path, flag: str
+) -> None:
+    """`--log-file --verbose` used to create a file named "--verbose".
+
+    "Another token exists" is not "a value was given": consuming the next
+    option silently misconfigures the run instead of reporting the usage
+    error it plainly is.
+    """
+    result = subprocess.run(
+        [str(cpp_dut_binary), flag, "--verbose"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+        cwd=str(REPO_ROOT),
+    )
+    assert result.returncode == 2
+    assert f"{flag} requires a value" in result.stderr

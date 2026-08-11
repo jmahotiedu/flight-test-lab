@@ -521,3 +521,49 @@ def test_progress_file_is_written_atomically(tmp_path: Path) -> None:
     assert not (tmp_path / "progress.tmp").exists()
     data = json.loads(path.read_text(encoding="utf-8"))
     assert data["lessons"]["x"]["status"] == "in_progress"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        # json.loads refuses both: CPython caps integer-string conversion, and
+        # deep nesting raises RecursionError, which is not a ValueError. Either
+        # escaping means `python -m learning` cannot start at all, so the
+        # documented backup-and-reset never runs.
+        '{"version": 1, "lessons": {}, "x": ' + "1" * 5000 + "}",
+        '{"version": 1, "lessons": {}, "x": ' + "[" * 2000 + "]" * 2000 + "}",
+    ],
+)
+def test_undecodable_progress_files_take_the_reset_path(
+    tmp_path: Path, payload: str
+) -> None:
+    path = tmp_path / "progress.json"
+    path.write_text(payload, encoding="utf-8")
+
+    store = ProgressStore(path)
+
+    assert store.snapshot()["lessons"] == {}
+    assert path.with_suffix(".corrupt.json").exists()
+
+
+def test_the_interview_baseline_is_taken_on_first_entry(tmp_path: Path) -> None:
+    """Answers from earlier in the course must not satisfy Day 14's drill.
+
+    Interview mode is open from Day 1, so a lifetime total says nothing about
+    whether this drill happened — a learner who had answered five questions
+    already passed the moment they opened the lesson.
+    """
+    store = ProgressStore(tmp_path / "progress.json")
+    for index in range(6):
+        store.record_interview(f"iq-{index}", True, ())
+
+    store.mark_started("d14-interview-drill")
+    record = store.snapshot()["lessons"]["d14-interview-drill"]
+    assert record["interview_baseline"] == 6
+
+    # Re-entering must not move the baseline forward and erase the drill.
+    for index in range(3):
+        store.record_interview(f"drill-{index}", True, ())
+    store.mark_started("d14-interview-drill")
+    record = store.snapshot()["lessons"]["d14-interview-drill"]
+    assert record["interview_baseline"] == 6

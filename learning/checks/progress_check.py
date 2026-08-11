@@ -50,30 +50,70 @@ def run(args: dict[str, Any], context: ValidatorContext) -> CheckResult:
             distinct += 1
             answered += total
 
-    passed = answered >= minimum
+    # Interview mode is available from Day 1, so a lifetime total says nothing
+    # about whether *this* drill happened: a learner who had answered five
+    # questions earlier in the course passed the moment they opened the lesson.
+    # mark_started snapshots the count on first entry; measure from there.
+    since_lesson = args.get("since_lesson")
+    baseline: int | None = 0
+    if isinstance(since_lesson, str):
+        lessons = state.get("lessons")
+        record = lessons.get(since_lesson) if isinstance(lessons, dict) else None
+        stored = record.get("interview_baseline") if isinstance(record, dict) else None
+        # No baseline means the lesson was never opened — which can only happen
+        # by calling the API directly. "Answers since a moment that never
+        # happened" is not a number, and defaulting it to zero would hand back
+        # the lifetime total this argument exists to stop counting.
+        baseline = stored if isinstance(stored, int) else None
+    during = answered - (baseline or 0)
+
+    passed = baseline is not None and during >= minimum
+    if baseline is None:
+        return CheckResult(
+            name="progress_check",
+            passed=False,
+            exit_status=1,
+            stdout=f"interview answers: {answered} total",
+            stderr="",
+            duration_ms=0,
+            interpretation=(
+                f"Check failed: {since_lesson} has not been started, so there "
+                "is no point to measure the drill from. Open the lesson, then "
+                "do the drill."
+            ),
+            details={"answers": answered, "distinct_questions": distinct},
+        )
     if passed:
         interpretation = str(
             args.get(
                 "success_note",
-                f"{answered} interview answers recorded across {distinct} "
+                f"{during} interview answers recorded across {distinct} "
                 "questions — the drill actually happened.",
             )
         )
     else:
         interpretation = (
-            f"Check failed: {answered} interview answer(s) recorded, "
-            f"{minimum} required. Open Interview mode and submit answers — "
-            "this lesson's objective is the drill itself, so it cannot be "
-            "completed by answering the quiz here."
+            f"Check failed: {during} interview answer(s) since you opened this "
+            f"lesson, {minimum} required (answers before it do not count). "
+            "Open Interview mode and submit answers — this lesson's objective "
+            "is the drill itself, so it cannot be completed by answering the "
+            "quiz here."
         )
 
     return CheckResult(
         name="progress_check",
         passed=passed,
         exit_status=0 if passed else 1,
-        stdout=f"interview answers: {answered} across {distinct} questions",
+        stdout=(
+            f"interview answers: {answered} total across {distinct} questions, "
+            f"{during} since this lesson began"
+        ),
         stderr="",
         duration_ms=0,
         interpretation=interpretation,
-        details={"answers": answered, "distinct_questions": distinct},
+        details={
+            "answers": answered,
+            "answers_during_lesson": during,
+            "distinct_questions": distinct,
+        },
     )
