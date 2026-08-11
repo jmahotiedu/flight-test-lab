@@ -50,6 +50,10 @@ if sys.get_int_max_str_digits() < MAX_INT_DIGITS:
 # fault injector must never do.  A day is far beyond any test's patience.
 MAX_DELAY_MS = 86_400_000
 
+# Used when --fault-delay-ms is not given at all; the option itself defaults to
+# None so an explicit value stays distinguishable from an absent one.
+DEFAULT_FAULT_DELAY_MS = 400
+
 # Maximum bytes in one request line.  Without a bound a client can hold a
 # connection open and stream forever without a newline, and the buffer grows
 # until the process dies — measured 25 MB accepted on one unterminated line by
@@ -193,8 +197,19 @@ def resolve_fault_config(args: argparse.Namespace) -> FaultConfig:
                 "--fault and --fault-config both select the fault behaviour; "
                 "pass only one so the command line describes the run"
             )
+        if args.fault_delay_ms is not None:
+            raise SystemExit(
+                "--fault-delay-ms is ignored when --fault-config is given: the "
+                "manifest owns the fault settings. Put response_delay_ms in "
+                "the file, or drop the flag, so the command line describes "
+                "the run"
+            )
         return load_fault_config(args.fault_config)
-    delay = int(args.fault_delay_ms)
+    delay = (
+        DEFAULT_FAULT_DELAY_MS
+        if args.fault_delay_ms is None
+        else int(args.fault_delay_ms)
+    )
     # A negative delay silently disables the fault at both runtime guards
     # (`> 0` checks), so the run looks clean while the requested fault never
     # engaged. The config-file path already rejects negatives; the CLI has to
@@ -456,7 +471,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--log-file", type=Path)
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--fault", choices=FAULT_NAMES, default=None)
-    parser.add_argument("--fault-delay-ms", type=int, default=400)
+    # default=None, not 400: resolve_fault_config has to be able to tell an
+    # explicit --fault-delay-ms from an unset one, because a manifest owns
+    # the fault settings and silently discarding the flag would leave the
+    # command line describing a run that did not happen.
+    parser.add_argument("--fault-delay-ms", type=int, default=None)
     parser.add_argument("--fault-config", type=Path, default=None)
     return parser.parse_args()
 

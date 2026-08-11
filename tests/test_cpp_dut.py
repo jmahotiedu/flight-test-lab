@@ -861,3 +861,58 @@ def test_a_large_but_valid_request_is_still_answered(
     assert _ask_raw(python_dut, payload, timeout=15) == _ask_raw(
         cpp_dut, payload, timeout=15
     )
+
+
+@pytest.mark.requirement("REQ-CPP-001")
+def test_both_duts_serve_a_connection_that_pauses(
+    cpp_dut: int, python_dut: int
+) -> None:
+    """An idle client must not be hung up on.
+
+    The listener carries a 200 ms receive timeout so shutdown is noticed
+    promptly, and an accepted socket inherits it — so that poll was being
+    applied to client traffic, and any connection idle for longer had recv()
+    return an error the handler read as EOF. Every parity test sent
+    immediately, so none of them saw it.
+    """
+
+    def ask_after_pause(port: int) -> bytes:
+        with socket.create_connection(("127.0.0.1", port), timeout=15) as connection:
+            time.sleep(1.0)
+            connection.sendall(b'{"command": "status", "sequence": 1}\n')
+            connection.settimeout(10)
+            return connection.makefile("rb").readline()
+
+    python_reply = ask_after_pause(python_dut)
+    assert b"READY" in python_reply
+    assert ask_after_pause(cpp_dut) == python_reply
+
+
+@pytest.mark.requirement("REQ-CPP-001")
+def test_the_line_cap_does_not_reject_a_pipelined_frame(
+    cpp_dut: int, python_dut: int
+) -> None:
+    """The cap applies to the unterminated remainder, not the whole buffer.
+
+    A legal near-limit frame whose successor arrives in the same read pushed
+    the buffer past the bound, so the native DUT answered INVALID_JSON and
+    closed while Python answered both.
+    """
+    from simulator.simulator import MAX_LINE_BYTES
+
+    prefix = b'{"command": "status", "sequence": 1, "pad": "'
+    pad = b"a" * (MAX_LINE_BYTES - 10 - len(prefix) - 3)
+    frames = prefix + pad + b'"}\n' + b'{"command": "status", "sequence": 2}\n'
+
+    def ask(port: int) -> list[bytes]:
+        with socket.create_connection(("127.0.0.1", port), timeout=20) as connection:
+            connection.sendall(b" ")  # its own segment, to misalign the reads
+            time.sleep(0.25)
+            connection.sendall(frames)
+            connection.settimeout(15)
+            reader = connection.makefile("rb")
+            return [reader.readline() for _ in range(2)]
+
+    replies = ask(python_dut)
+    assert all(b"READY" in line for line in replies), replies
+    assert ask(cpp_dut) == replies

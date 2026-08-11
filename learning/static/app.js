@@ -202,7 +202,12 @@ function renderFocus(lesson) {
       // reply used to advance the counter twice and skip the hint between.
       hintBtn.disabled = true;
       const asked = state.hintIndex;
+      // state.hintIndex is global, so a reply for this lesson arriving after
+      // the learner moved to another one would overwrite the position that
+      // lesson had just initialised — and its first hint would be skipped.
+      const token = state.navigation;
       const { data } = await api.post("/api/hint", { lesson_id: lesson.id, index: asked });
+      if (token !== state.navigation) return;
       if (data.text) {
         // Position comes from the server's revealed count, not from a local
         // increment, so a duplicate reply cannot move it twice.

@@ -211,20 +211,6 @@ void handle_connection(Socket connection, std::string peer,
     }
     buffer.append(chunk, static_cast<std::size_t>(received));
 
-    // A client that never sends a newline would otherwise grow this buffer
-    // until allocation fails, and an exception escaping a thread entry point
-    // calls std::terminate — one malformed request taking down the DUT.
-    if (buffer.size() > kMaxLineBytes) {
-      log_message(Level::Warning, "request_too_long peer=" + peer + " bytes=" +
-                                      std::to_string(buffer.size()) +
-                                      " limit=" +
-                                      std::to_string(kMaxLineBytes));
-      send_all(connection.get(),
-               std::string(R"({"error_code": "INVALID_JSON", "status": "error"})") +
-                   "\n");
-      break;
-    }
-
     // TCP is a byte stream: one recv may carry several lines, or half of one.
     // The newline is the frame boundary, not the packet.
     std::size_t newline;
@@ -240,6 +226,24 @@ void handle_connection(Socket connection, std::string peer,
     }
     if (stop) {
       return;
+    }
+
+    // The cap applies to what is left *after* extraction: the unterminated
+    // frame. Checking the whole buffer first rejected a legal near-limit
+    // frame whose successor happened to arrive in the same recv — a
+    // divergence, since the Python DUT reads one line at a time and answers
+    // both. What the bound is for is a client that never sends a newline: the
+    // buffer would grow until allocation fails, and an exception escaping a
+    // thread entry point calls std::terminate.
+    if (buffer.size() > kMaxLineBytes) {
+      log_message(Level::Warning, "request_too_long peer=" + peer + " bytes=" +
+                                      std::to_string(buffer.size()) +
+                                      " limit=" +
+                                      std::to_string(kMaxLineBytes));
+      send_all(connection.get(),
+               std::string(R"({"error_code": "INVALID_JSON", "status": "error"})") +
+                   "\n");
+      break;
     }
   }
 
@@ -413,6 +417,24 @@ int run_server(const ServerOptions& options, std::atomic<bool>& stop_requested) 
       continue;  // timed out (the poll above) or interrupted — re-check the flag
     }
     Socket connection(accepted);
+    // Clear the receive timeout the listener carries. An accepted socket
+    // inherits the listener's options, and that 200 ms poll — which exists so
+    // shutdown is noticed promptly — was being applied to *client* traffic:
+    // any connection idle for longer than that had recv() return an error,
+    // which this handler read as EOF and hung up. Measured against the Python
+    // DUT, a 300 ms pause before sending a request was answered there and
+    // dropped here. Handlers block until their client speaks or leaves.
+#ifdef _WIN32
+    DWORD no_timeout = 0;
+    ::setsockopt(connection.get(), SOL_SOCKET, SO_RCVTIMEO,
+                 reinterpret_cast<const char*>(&no_timeout),
+                 sizeof(no_timeout));
+#else
+    timeval no_timeout{};
+    ::setsockopt(connection.get(), SOL_SOCKET, SO_RCVTIMEO,
+                 reinterpret_cast<const char*>(&no_timeout),
+                 sizeof(no_timeout));
+#endif
     // Kept, not detached. A detached handler outlives run_server, so on Ctrl+C
     // with a client still connected the WinsockGuard below would call
     // WSACleanup — and the process-wide logging globals would begin

@@ -509,3 +509,42 @@ def test_a_duplicate_key_makes_the_manifest_ambiguous(tmp_path: Path) -> None:
 
     path.write_text('{"drop_connection": true}', encoding="utf-8")
     assert load_fault_config(path).drop_connection is True
+
+
+@pytest.mark.requirement("REQ-FAULT-001")
+def test_a_delay_flag_beside_a_manifest_is_rejected(tmp_path: Path) -> None:
+    """The command line has to describe the run that happened.
+
+    --fault-config owns the fault settings, so an explicit --fault-delay-ms
+    beside it was silently discarded: a manifest with response_delay_ms 0 plus
+    --fault-delay-ms 400 launched with no delay at all, from an invocation
+    that reads as though it requested one. Same reasoning as the adjacent
+    --fault conflict check.
+    """
+    config = tmp_path / "fault.json"
+    config.write_text(json.dumps({"response_delay_ms": 0}), encoding="utf-8")
+    argv = [
+        sys.executable,
+        "-m",
+        "simulator.simulator",
+        "--port",
+        "9097",
+        "--fault-config",
+        str(config),
+    ]
+
+    conflict = subprocess.run(
+        [*argv, "--fault-delay-ms", "400"],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+        cwd=str(REPO_ROOT),
+    )
+    assert conflict.returncode != 0
+    assert "--fault-delay-ms is ignored" in (conflict.stderr or conflict.stdout)
+
+    # The manifest alone still starts, so the check is about the conflict.
+    from simulator.simulator import load_fault_config
+
+    assert load_fault_config(config).response_delay_ms == 0
