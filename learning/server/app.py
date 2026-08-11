@@ -19,8 +19,10 @@ from learning.server.curriculum import Curriculum, Lesson
 from learning.server.progress import ProgressStore
 from learning.server.toolchain import Toolchain
 from learning.server.validators import (
+    CheckResult,
     ValidatorContext,
     run_validator,
+    truncate,
     validator_names,
 )
 
@@ -451,13 +453,41 @@ class LearningHandler(BaseHTTPRequestHandler):
                 HTTPStatus.INTERNAL_SERVER_ERROR, "bad validator args"
             )
             return
-        result = run_validator(verify_block["validator"], args, self.server.context)
+        crashed = False
+        try:
+            result = run_validator(verify_block["validator"], args, self.server.context)
+        except Exception as exc:  # noqa: BLE001 - a crash must still answer
+            # Without this the exception unwinds out of do_POST, the connection
+            # closes with no body, and the page sits on "Running…" forever —
+            # worse than a red check, because it reports nothing at all.
+            # A validator that cannot run has verified nothing, so it counts as
+            # a failure (the lesson must not complete on a check that never
+            # executed) and the real error is shown.
+            import traceback
+
+            crashed = True
+            result = CheckResult(
+                name=str(verify_block["validator"]),
+                passed=False,
+                exit_status=None,
+                stdout="",
+                stderr=truncate(traceback.format_exc()),
+                duration_ms=0,
+                interpretation=(
+                    f"The check could not run: {type(exc).__name__}: {exc}. "
+                    "That is a fault in the check itself, not in your work — "
+                    "but nothing was verified, so the gate stays shut."
+                ),
+            )
         self.server.progress.record_validation(
             lesson.id,
             str(block_id),
             result.passed,
             mandatory=bool(verify_block.get("mandatory", False)),
-            concepts=lesson.concepts,
+            # A broken check is not evidence about the learner. Crediting it as
+            # a missed concept would mark them weak on a topic because of a bug
+            # in this codebase.
+            concepts=() if crashed else lesson.concepts,
         )
         self._send_json(result.to_dict())
 

@@ -17,7 +17,7 @@ from io import StringIO
 from pathlib import Path
 from typing import Any
 
-from learning.checks.source_check import _resolve_repo_path
+from learning.checks.source_check import _resolve_repo_path, read_artifact
 from learning.server.validators import CheckResult, ValidatorContext, truncate
 
 
@@ -231,11 +231,9 @@ def run(args: dict[str, Any], context: ValidatorContext) -> CheckResult:
     target = _resolve_repo_path(context.repo_root, relative)
 
     failures: list[str] = []
-    text = ""
-    if not target.exists():
-        failures.append(f"{relative} does not exist")
-    else:
-        text = target.read_text(encoding="utf-8", errors="replace")
+    text, error = read_artifact(target, relative)
+    if error:
+        failures.append(error)
 
     for pattern in args.get("contains", []):
         if not isinstance(pattern, str):

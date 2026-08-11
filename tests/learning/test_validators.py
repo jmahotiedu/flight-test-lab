@@ -608,6 +608,30 @@ def test_unknown_validator_rejected() -> None:
         run_validator("arbitrary_shell", {"command": "echo hi"}, CONTEXT)
 
 
+@pytest.mark.parametrize("validator", ["artifact_check", "source_check"])
+def test_an_unreadable_artifact_is_a_failed_check_not_a_crash(
+    validator: str, tmp_path: Path
+) -> None:
+    """exists() is not is_file().
+
+    A learner who creates the expected path as a directory made the check
+    fail; letting the OSError escape takes the /api/validate request down
+    without a response and leaves the page on "Running…" instead.
+    """
+    (tmp_path / "artifact.json").mkdir()
+    args: dict[str, object] = {"file": "artifact.json"}
+    args |= (
+        {"contains": ["anything"]}
+        if validator == "artifact_check"
+        else {"must_contain": ["anything"]}
+    )
+
+    result = run_validator(validator, args, ValidatorContext(repo_root=tmp_path))
+
+    assert not result.passed
+    assert "is not a file" in result.interpretation
+
+
 def _process_alive(pid: int) -> bool:
     if sys.platform == "win32":
         listing = subprocess.run(
@@ -813,6 +837,54 @@ def test_other_exclusive_create_idioms_are_accepted(
     )
     result = run_validator("source_check", _shape_gate(bench_module), CONTEXT)
     assert result.passed, result.interpretation
+
+
+SEQUENCE_ECHO_TEST = """import pytest
+
+{decorator}def test_sequence_echo_on_status_response(lab_client):
+    response = lab_client.request({{"command": "status", "sequence": 42}})
+    assert response["sequence"] == 42
+"""
+
+
+@pytest.fixture()
+def sequence_echo_module() -> Iterator[Path]:
+    target = REPO_ROOT / "tests" / "test_sequence_echo_under_test.py"
+    try:
+        yield target
+    finally:
+        target.unlink(missing_ok=True)
+
+
+@pytest.mark.parametrize(
+    ("label", "decorator", "expected"),
+    [
+        ("comment only", "# verifies REQ-LEARN-001\n", False),
+        ("wrong id", '@pytest.mark.requirement("REQ-REC-001")\n', False),
+        ("marked", '@pytest.mark.requirement("REQ-LEARN-001")\n', True),
+    ],
+)
+def test_the_traceability_lesson_requires_a_real_marker(
+    sequence_echo_module: Path, label: str, decorator: str, expected: bool
+) -> None:
+    """Day 7's chain is only as good as its load-bearing link.
+
+    --strict-markers rejects an unknown marker but never requires one to
+    exist, so a learner could supply the requirement row, the traceability row
+    and a passing test and still ship a test that declares nothing.
+    """
+    sequence_echo_module.write_text(
+        SEQUENCE_ECHO_TEST.format(decorator=decorator), encoding="utf-8"
+    )
+    result = run_validator(
+        "source_check",
+        {
+            "file": str(sequence_echo_module.relative_to(REPO_ROOT).as_posix()),
+            "must_have_requirement_marker": "REQ-LEARN-001",
+        },
+        CONTEXT,
+    )
+    assert result.passed is expected, result.interpretation
 
 
 DUT_CONFIG_SPEC = {"dut_config": {"object": {"host": "string", "port": "port"}}}

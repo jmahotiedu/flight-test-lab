@@ -138,7 +138,7 @@
           "type": "learn",
           "id": "learn",
           "text": "A pytest process that exits without terminating its DUT leaves an **orphan**: the simulator keeps running, keeps holding its port, and keeps writing its log — invisible to the next run, which then fails readiness or talks to the wrong server. Orphans outlive the test session that created them; `ps` (or Task Manager) is the only place they show up.\n\nThe `dut` fixture's defense is structural: everything after `yield` sits in a `finally` block, so teardown runs on pass, on failure, and on KeyboardInterrupt — never skipped.",
-          "more": "Python gives fixtures the yield/finally contract precisely because test outcomes are unpredictable: an assertion two tests from now must not decide whether your process dies. The conftest ladder is terminate -> wait(5) -> kill on TimeoutExpired -> wait again, guarded by `if process.poll() is None` so an already-dead DUT skips the dance, and followed by a hard pytest.fail if the process STILL lives — a fixture that cannot kill its own DUT is itself a defect worth failing the run over. In this sandbox the validator itself plays the finally role: its snippet kills and reaps whatever it leaked, so nothing survives the exercise. On a real rig the equivalent failure mode is worse: an orphaned DUT attached to hardware keeps commanding it."
+          "more": "The test's outcome never decides whether teardown runs — pytest resumes the generator either way. The `finally` is about the teardown code itself: it runs even if an earlier cleanup step raised, and even if the generator is closed instead of resumed (an abandoned fixture gets GeneratorExit at the `yield`, which plain trailing code never sees). The conftest ladder is terminate -> wait(5) -> kill on TimeoutExpired -> wait again, guarded by `if process.poll() is None` so an already-dead DUT skips the dance, and followed by a hard pytest.fail if the process STILL lives — a fixture that cannot kill its own DUT is itself a defect worth failing the run over. In this sandbox the validator itself plays the finally role: its snippet kills and reaps whatever it leaked, so nothing survives the exercise. On a real rig the equivalent failure mode is worse: an orphaned DUT attached to hardware keeps commanding it."
         },
         {
           "type": "do",
@@ -187,9 +187,9 @@
         {
           "type": "explain",
           "id": "explain",
-          "question": "Why does the real conftest.py put the terminate/kill ladder in a finally block after yield, rather than as plain code at the end of the fixture?",
-          "keywords": ["finally", "teardown", "always"],
-          "sample_answer": "A fixture's code after yield only runs if control returns there normally — a failing or erroring test still unwinds through the yield, and finally guarantees the teardown executes on every path: pass, fail, or interrupt. Plain trailing code could be skipped by an exception, leaking the DUT; finally makes cleanup unconditional."
+          "question": "A test using the `dut` fixture fails. Does the terminate/kill ladder after `yield` still run — and if the outcome does not decide that, what is the `finally` actually protecting?",
+          "keywords": ["resume", "outcome", "raise", "skip", "unconditional"],
+          "sample_answer": "Yes, it still runs: pytest resumes a yield fixture for teardown after every outcome — pass, fail, error, even KeyboardInterrupt — so the test result never decides whether the DUT dies. The `finally` protects the teardown's own path. If a step before the kill raises — a `wait(timeout=...)` that times out where nothing catches it, an assertion about final state — plain trailing code after it is skipped and the process leaks; inside `finally` the cleanup is unconditional. It also runs when the generator is closed rather than resumed, which plain code never sees."
         }
       ],
       "hints": [

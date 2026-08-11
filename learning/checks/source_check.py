@@ -24,6 +24,25 @@ def _resolve_repo_path(repo_root: Path, relative: str) -> Path:
     return candidate
 
 
+def read_artifact(target: Path, relative: str) -> tuple[str, str]:
+    """Read a checked artifact.  Returns (text, failure) — never raises.
+
+    ``exists()`` is not ``is_file()``: a learner who creates the expected path
+    as a directory, or a file the server cannot read, made the check fail.
+    Letting the OSError escape would take the whole /api/validate request down
+    without a response, leaving the UI on "Running…" forever — the one outcome
+    worse than a red check, because it reports nothing at all.
+    """
+    if not target.exists():
+        return "", f"{relative} does not exist"
+    if not target.is_file():
+        return "", f"{relative} is not a file (it is a directory)"
+    try:
+        return target.read_text(encoding="utf-8", errors="replace"), ""
+    except OSError as exc:
+        return "", f"{relative} could not be read: {exc.strerror or exc}"
+
+
 def _marked_functions(tree: ast.AST, requirement: str) -> list[str]:
     """Names of test functions carrying @pytest.mark.requirement(<requirement>).
 
@@ -138,11 +157,9 @@ def run(args: dict[str, Any], context: ValidatorContext) -> CheckResult:
     target = _resolve_repo_path(context.repo_root, relative)
 
     failures: list[str] = []
-    if not target.exists():
-        failures.append(f"{relative} does not exist")
-        text = ""
-    else:
-        text = target.read_text(encoding="utf-8", errors="replace")
+    text, error = read_artifact(target, relative)
+    if error:
+        failures.append(error)
 
     for pattern in args.get("must_contain", []):
         if not isinstance(pattern, str):

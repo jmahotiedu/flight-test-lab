@@ -253,3 +253,58 @@ def test_unavailable_lesson_cannot_validate(tmp_path: Path) -> None:
         instance.shutdown()
         instance.server_close()
         thread.join(timeout=5)
+
+
+def test_a_crashing_validator_answers_instead_of_hanging(
+    server: LearningServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A validator that raises must still produce a response.
+
+    Without this the exception unwinds out of do_POST, the connection closes
+    with no body, and the page sits on "Running…" forever — the one outcome
+    worse than a red check, because it reports nothing at all.
+    """
+    import learning.server.app as app_module
+
+    def explode(*_args: object, **_kwargs: object) -> None:
+        raise IsADirectoryError(21, "Is a directory")
+
+    monkeypatch.setattr(app_module, "run_validator", explode)
+
+    status, data = _request(
+        server,
+        "POST",
+        "/api/validate",
+        {"lesson_id": "d1-import-no-side-effects", "block_id": "verify"},
+    )
+
+    assert status == 200
+    assert data["passed"] is False
+    assert "could not run" in data["interpretation"]
+    assert "IsADirectoryError" in data["interpretation"]
+
+
+def test_a_crashing_validator_does_not_mark_the_learner_weak(
+    server: LearningServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A bug in a check is not evidence about the learner.
+
+    Crediting the crash as a missed concept would mark someone weak on a topic
+    because of a defect in this codebase.
+    """
+    import learning.server.app as app_module
+
+    before = server.progress.concept_mastery(server.curriculum.concepts)
+    monkeypatch.setattr(
+        app_module,
+        "run_validator",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("check is broken")),
+    )
+    _request(
+        server,
+        "POST",
+        "/api/validate",
+        {"lesson_id": "d1-import-no-side-effects", "block_id": "verify"},
+    )
+    after = server.progress.concept_mastery(server.curriculum.concepts)
+    assert after == before

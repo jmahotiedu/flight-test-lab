@@ -149,6 +149,18 @@
         },
         {
           "type": "verify",
+          "id": "v-marker",
+          "validator": "source_check",
+          "mandatory": true,
+          "description": "Parses tests/test_sequence_echo.py and requires a test decorated with @pytest.mark.requirement(\"REQ-LEARN-001\"). --strict-markers rejects an unknown marker but never requires one to exist, so without this the other three gates certify a chain whose load-bearing link — the test declaring which requirement it verifies — is missing.",
+          "args": {
+            "file": "tests/test_sequence_echo.py",
+            "must_have_requirement_marker": "REQ-LEARN-001",
+            "success_note": "The test itself declares REQ-LEARN-001, so the link survives a rename: the marker travels with the code, not with a CSV row that has to be kept in step by hand."
+          }
+        },
+        {
+          "type": "verify",
           "id": "v-test",
           "validator": "pytest_check",
           "mandatory": true,

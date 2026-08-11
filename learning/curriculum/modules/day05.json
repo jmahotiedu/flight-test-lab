@@ -97,16 +97,16 @@
         {
           "type": "predict",
           "id": "predict",
-          "question": "The full suite has 6 tests across 3 files, and 4 of them request lab_client. How many simulator processes start during one `pytest` run?",
-          "options": ["6 — one per test", "4 — one per lab_client request", "3 — one per file", "1 — session scope builds dut once"],
+          "question": "Run `pytest tests/test_cleanup.py tests/test_status.py tests/test_protocol.py` — 6 tests across 3 files, 4 of which request `lab_client` and 1 `dut` directly. How many simulator processes start?",
+          "options": ["6 — one per test", "5 — one per fixture request", "3 — one per file", "1 — session scope builds dut once"],
           "answer_index": 3,
-          "reveal": "`dut` is declared `@pytest.fixture(scope=\"session\")`: the first request builds it (spawn + readiness poll), every later request reuses the same RunningDut, and teardown kills the process once at session end. lab_client being function-scoped only means a new TCP connection per test — to the same process."
+          "reveal": "(The whole `tests/` tree is much larger now and several of its suites spawn DUTs of their own, so this counts only the three files that share this fixture.) `dut` is declared `@pytest.fixture(scope=\"session\")`: the first request builds it (spawn + readiness poll), every later request reuses the same RunningDut, and teardown kills the process once at session end. lab_client being function-scoped only means a new TCP connection per test — to the same process."
         },
         {
           "type": "do",
           "id": "do",
-          "instructions": "Watch fixture setup/teardown happen by scope. Run:\n\n```pytest -v --setup-show tests\n```\n\n(bash identical). In the output, find `SETUP S dut` appearing exactly **once** before the first test, `SETUP F lab_client` appearing before **every** test that requests it, and the matching `TEARDOWN` lines — `TEARDOWN S dut` only after the last test.\n\nThen open `tests/conftest.py` and trace the chain: `lab_client` requests `dut`; `dut` requests `evidence_dir`; `evidence_dir` reads the `EVIDENCE_DIR` env var (this is how CI sandboxes the evidence tree). Finally run the two files that prove process state and protocol behavior agree:\n\n```pytest -v tests\\test_cleanup.py tests\\test_status.py\n```",
-          "command": "pytest -v --setup-show tests"
+          "instructions": "Watch fixture setup/teardown happen by scope. Run:\n\n```pytest -v --setup-show tests/test_cleanup.py tests/test_status.py tests/test_protocol.py\n```\n\n(bash identical). In the output, find `SETUP S dut` appearing exactly **once** before the first test, `SETUP F lab_client` appearing before **every** test that requests it, and the matching `TEARDOWN` lines — `TEARDOWN S dut` only after the last test.\n\nThen open `tests/conftest.py` and trace the chain: `lab_client` requests `dut`; `dut` requests `evidence_dir`; `evidence_dir` reads the `EVIDENCE_DIR` env var (this is how CI sandboxes the evidence tree). Finally run the two files that prove process state and protocol behavior agree:\n\n```pytest -v tests\\test_cleanup.py tests\\test_status.py\n```",
+          "command": "pytest -v --setup-show tests/test_cleanup.py tests/test_status.py tests/test_protocol.py"
         },
         {
           "type": "verify",

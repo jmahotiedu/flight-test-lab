@@ -301,31 +301,39 @@ class ProgressStore:
             entry["correct" if correct else "incorrect"] += 1
             entry["last_seen"] = _now()
 
-    def _prerequisite_satisfied_locked(
+    def _lesson_is_complete_locked(
         self,
         lesson_id: str,
         curriculum: Curriculum | None,
         seen: set[str],
     ) -> bool:
-        """Is this prerequisite genuinely satisfied, all the way up the chain?
+        """Is this lesson genuinely complete, all the way up the chain?
 
-        Without the curriculum this can only trust the stored status. With it,
-        the lesson's own gates are re-evaluated: completing A then B, then
-        breaking A's mandatory check, must not leave C completable through a
-        B that is only nominally complete.
+        Two conditions, and both are load-bearing:
+
+        * The learner marked it complete.  Passing the last gate is not the
+          same act as finishing — a learner who runs the final check and then
+          closes the tab has not said "done", and treating that as complete
+          would unlock the next lesson while ``mark_complete`` still refuses
+          it as a prerequisite.
+        * Its gates still hold, recursively.  Completing A then B and then
+          breaking A's mandatory check must not leave C completable through a
+          B that is only nominally complete.
+
+        This is the single definition of "complete"; prerequisites, roadmap
+        locks, navigation and the counters all ask it, so they cannot drift
+        apart in either direction.
         """
         record = self._state["lessons"].get(lesson_id)
         if record is None or record.get("status") != "complete":
             return False
         if curriculum is None or lesson_id in seen:
             return True
-        prerequisite_lesson = curriculum.lessons.get(lesson_id)
-        if prerequisite_lesson is None:
+        lesson = curriculum.lessons.get(lesson_id)
+        if lesson is None:
             return True
         seen.add(lesson_id)
-        complete, _ = self._lesson_completion_locked(
-            prerequisite_lesson, curriculum, seen
-        )
+        complete, _ = self._lesson_completion_locked(lesson, curriculum, seen)
         return complete
 
     def lesson_completion(
@@ -368,7 +376,7 @@ class ProgressStore:
         seen = set(seen or ())
         seen.add(lesson.id)
         for prerequisite in lesson.prerequisites:
-            if not self._prerequisite_satisfied_locked(prerequisite, curriculum, seen):
+            if not self._lesson_is_complete_locked(prerequisite, curriculum, seen):
                 missing.append(f"prerequisite {prerequisite!r} is not complete")
         validations = record["validations"]
         for block in lesson.mandatory_validators():
@@ -400,23 +408,21 @@ class ProgressStore:
         return True, []
 
     def completion_map(self, curriculum: Curriculum) -> dict[str, bool]:
-        """Current recursive completion for every lesson in the curriculum.
+        """Which lessons are complete, by the same rule prerequisites use.
 
         Navigation, roadmap locks and the progress counters all used to read
-        the *stored* status, which drifts from the gate: completing A then B,
-        then breaking A's mandatory check, leaves B stored "complete" while
-        the recursive gate rejects anything downstream of it.  The roadmap
-        would then show C unlocked and route the learner into a lesson that
-        cannot be finished, blaming a prerequisite it had just ticked green.
+        the *stored* status, which drifts from the gate in both directions:
+        a lesson whose prerequisite later broke stays stored "complete", and
+        a lesson whose gates all pass is not complete until the learner says
+        so.  Either drift shows the roadmap one thing and has
+        ``/api/complete`` insist on another.
 
-        One evaluation, shared by every caller, so the three views cannot
-        disagree.  This reads recorded outcomes only — no validator re-runs.
+        One evaluation of one predicate, shared by every caller.  Reads
+        recorded outcomes only — no validator re-runs.
         """
         with self._lock:
             return {
-                lesson_id: self._lesson_completion_locked(
-                    curriculum.lessons[lesson_id], curriculum, set()
-                )[0]
+                lesson_id: self._lesson_is_complete_locked(lesson_id, curriculum, set())
                 for lesson_id in curriculum.ordered_lesson_ids
             }
 

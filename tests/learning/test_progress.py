@@ -411,6 +411,43 @@ def test_navigation_and_counts_follow_the_recursive_gate(tmp_path: Path) -> None
     assert sum(1 for done in complete.values() if done) == 0
 
 
+def test_passing_every_gate_is_not_the_same_as_finishing(tmp_path: Path) -> None:
+    """Completion is the learner's act, not a side effect of the last check.
+
+    Someone who runs the final validator and then closes the tab has not said
+    "done". Treating that as complete unlocked the next lesson and routed them
+    there, while mark_complete still refused it as a prerequisite — the mirror
+    of the drift that made navigation read the recursive gate in the first
+    place, and just as contradictory.
+    """
+    curriculum = load_curriculum(LEARNING_ROOT, validator_names())
+    first, second = "d1-import-no-side-effects", "d1-main-entrypoint"
+    store = ProgressStore(tmp_path / "progress.json")
+
+    lesson = curriculum.lessons[first]
+    store.mark_started(lesson.id)
+    for block in lesson.mandatory_validators():
+        store.record_validation(lesson.id, block["id"], True)
+    for block_id in lesson.required_quiz_ids():
+        store.record_quiz(lesson.id, block_id, True, lesson.concepts)
+    for block_id in lesson.required_explain_ids():
+        store.record_explain(lesson.id, block_id, True, lesson.concepts)
+
+    # Every gate passes; Continue was never pressed.
+    assert store.lesson_completion(lesson, curriculum)[0]
+    assert store.snapshot()["lessons"][first]["status"] == "in_progress"
+
+    complete = store.completion_map(curriculum)
+    assert complete[first] is False
+    dependent = curriculum.lessons[second]
+    assert not all(complete.get(p, False) for p in dependent.prerequisites)
+    assert store.resume_lesson_id(curriculum) == first
+
+    assert store.mark_complete(lesson, curriculum)[0]
+    assert store.completion_map(curriculum)[first] is True
+    assert store.resume_lesson_id(curriculum) == second
+
+
 def test_progress_file_is_written_atomically(tmp_path: Path) -> None:
     path = tmp_path / "progress.json"
     store = ProgressStore(path)
