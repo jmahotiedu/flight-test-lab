@@ -1,11 +1,15 @@
 #include "dut/server.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #ifdef _WIN32
@@ -30,6 +34,11 @@ std::atomic<int> g_request_count{0};
 // that tries to take it never returns.  A deadlock, on purpose, with two named
 // threads for GDB to show.
 std::mutex g_hang_mutex;
+
+// How long shutdown waits for handlers to finish before leaving
+// without static destruction.  Long enough for a client that is
+// merely slow, short enough that Ctrl+C still feels immediate.
+constexpr auto kShutdownGrace = std::chrono::seconds(2);
 
 void close_handle(socket_t handle) {
 #ifdef _WIN32
@@ -189,6 +198,28 @@ void handle_connection(Socket connection, std::string peer,
   log_message(Level::Info, "client_disconnected peer=" + peer);
 }
 
+// A running handler plus a flag it sets on the way out.  std::thread cannot
+// be asked whether it has finished, and joining one that has not would block
+// the accept loop, so the flag is what makes incremental reaping possible.
+struct Handler {
+  std::thread thread;
+  std::shared_ptr<std::atomic<bool>> done;
+};
+
+void reap_finished(std::vector<Handler>& handlers) {
+  const auto finished = std::remove_if(
+      handlers.begin(), handlers.end(), [](Handler& handler) {
+        if (!handler.done->load()) {
+          return false;
+        }
+        if (handler.thread.joinable()) {
+          handler.thread.join();
+        }
+        return true;
+      });
+  handlers.erase(finished, handlers.end());
+}
+
 }  // namespace
 
 Fault fault_from_string(const std::string& name) {
@@ -319,6 +350,7 @@ int run_server(const ServerOptions& options, std::atomic<bool>& stop_requested) 
     maybe_inject_fault(options, 0);
   }
 
+  std::vector<Handler> handlers;
   while (!stop_requested.load()) {
     sockaddr_in peer_address{};
 #ifdef _WIN32
@@ -333,12 +365,53 @@ int run_server(const ServerOptions& options, std::atomic<bool>& stop_requested) 
       continue;  // timed out (the poll above) or interrupted — re-check the flag
     }
     Socket connection(accepted);
-    std::thread(handle_connection, std::move(connection),
-                peer_label(peer_address), options)
-        .detach();
+    // Kept, not detached. A detached handler outlives run_server, so on Ctrl+C
+    // with a client still connected the WinsockGuard below would call
+    // WSACleanup — and the process-wide logging globals would begin
+    // destruction — while that thread was still inside recv() or writing a log
+    // line. Every handler now has a lifetime that ends before the resources it
+    // uses do.
+    auto done = std::make_shared<std::atomic<bool>>(false);
+    handlers.push_back(Handler{
+        std::thread(
+            [done](Socket socket, std::string peer, ServerOptions settings) {
+              handle_connection(std::move(socket), std::move(peer), settings);
+              done->store(true);
+            },
+            std::move(connection), peer_label(peer_address), options),
+        done});
+    // Reap as we go, so a long session does not accumulate one thread handle
+    // per connection ever made.
+    reap_finished(handlers);
   }
 
+  // Close the listener first: no new handlers start, and one blocked in recv()
+  // wakes as soon as its client goes away.
+  listener.close();
+  const auto deadline = std::chrono::steady_clock::now() + kShutdownGrace;
+  for (Handler& handler : handlers) {
+    while (!handler.done->load() &&
+           std::chrono::steady_clock::now() < deadline) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    if (handler.done->load() && handler.thread.joinable()) {
+      handler.thread.join();
+    }
+  }
+  const bool all_finished = std::all_of(
+      handlers.begin(), handlers.end(),
+      [](const Handler& handler) { return handler.done->load(); });
+
   log_message(Level::Info, "dut_stopped requested=True");
+  if (!all_finished) {
+    // The hang fault blocks a handler on purpose and forever, so waiting is
+    // not an option and neither is destroying Winsock underneath it. Leaving
+    // without running static destructors is the only ending that races
+    // nothing; every log line is already flushed as it is written.
+    log_message(Level::Warning,
+                "handler_still_running exiting_without_static_destruction");
+    std::_Exit(0);
+  }
   return 0;
 }
 

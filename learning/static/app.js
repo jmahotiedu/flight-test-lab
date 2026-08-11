@@ -22,6 +22,7 @@ const api = {
 const state = {
   lesson: null,        // current lesson payload (includes progress)
   hintIndex: 0,        // next hint to request for current lesson
+  navigation: 0,       // bumped per lesson load; stale responses are discarded
 };
 
 function el(tag, attrs = {}, ...children) {
@@ -92,6 +93,10 @@ async function refreshTopbar() {
 /* ---------- focus view ---------- */
 
 async function loadLesson(lessonId) {
+  // Two overlapping navigations can finish out of order, and the slower one
+  // would then paint the lesson the learner already moved away from. The flow
+  // subrequest guards this; the top-level load has to as well.
+  const token = ++state.navigation;
   // Opening a lesson is a state change, so it goes through a POST the
   // same-origin guard covers. The GET stays read-only; falling back to it
   // means an unavailable lesson still renders (with its reason) instead of
@@ -100,6 +105,7 @@ async function loadLesson(lessonId) {
   const lesson = started.ok
     ? started.data
     : await api.get("/api/lesson/" + encodeURIComponent(lessonId));
+  if (token !== state.navigation) return;  // a newer navigation won
   state.lesson = lesson;
   state.hintIndex = lesson.progress.hints_used || 0;
   renderFocus(lesson);

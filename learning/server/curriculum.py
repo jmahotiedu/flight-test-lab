@@ -134,7 +134,9 @@ def _require_str_list(data: dict[str, Any], key: str, path: Path) -> list[str]:
 def _load_json(path: Path) -> Any:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
+    # A curriculum file is repository data, but a traceback at startup is
+    # still worse than the CurriculumError this reports.
+    except (ValueError, RecursionError) as exc:
         raise CurriculumError(f"{path}: invalid JSON: {exc}") from exc
 
 

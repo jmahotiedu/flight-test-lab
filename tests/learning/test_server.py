@@ -5,6 +5,7 @@ from __future__ import annotations
 import http.client
 import json
 import threading
+import time
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -433,3 +434,78 @@ def test_the_app_and_non_browser_clients_still_work(server: LearningServer) -> N
     assert same_origin == 200
     no_origin, _ = _raw_post(server, {"Content-Type": "application/json"})
     assert no_origin == 200
+
+
+def test_an_undecodable_post_body_gets_a_400(server: LearningServer) -> None:
+    """CPython's digit cap raises a plain ValueError, not a JSONDecodeError.
+
+    It escaped the request thread, so the client got a closed connection
+    instead of the documented 400 and the page waited forever.
+    """
+    host, port = server.server_address[:2]
+    connection = http.client.HTTPConnection(str(host), port, timeout=30)
+    connection.request(
+        "POST",
+        "/api/step",
+        body='{"lesson_id": ' + "1" * 5000 + "}",
+        headers={"Content-Type": "application/json"},
+    )
+    response = connection.getresponse()
+    data = json.loads(response.read())
+    connection.close()
+
+    assert response.status == 400
+    assert "invalid JSON body" in data["error"]
+
+
+def test_validators_do_not_run_concurrently(
+    server: LearningServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Validators share one checkout, so they have to take turns.
+
+    Day 11's verify-configure writes cpp/build while verify-build reads and
+    writes the same tree; two tabs or a double-click would have them racing and
+    reporting failures that are artefacts of the collision. Disabling a DOM
+    button cannot fix that — it is not the same document.
+    """
+    import learning.server.app as app_module
+    from learning.server.validators import CheckResult
+
+    intervals: list[tuple[float, float]] = []
+    guard = threading.Lock()
+
+    def slow_validator(name: str, args: dict, context: object) -> CheckResult:
+        started = time.monotonic()
+        time.sleep(0.25)
+        with guard:
+            intervals.append((started, time.monotonic()))
+        return CheckResult(
+            name=name,
+            passed=True,
+            exit_status=0,
+            stdout="",
+            stderr="",
+            duration_ms=250,
+            interpretation="ok",
+        )
+
+    monkeypatch.setattr(app_module, "run_validator", slow_validator)
+
+    def hit() -> None:
+        _request(
+            server,
+            "POST",
+            "/api/validate",
+            {"lesson_id": "d1-import-no-side-effects", "block_id": "verify"},
+        )
+
+    threads = [threading.Thread(target=hit) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=60)
+
+    assert len(intervals) == 4
+    intervals.sort()
+    for earlier, later in zip(intervals, intervals[1:], strict=False):
+        assert earlier[1] <= later[0] + 0.01, f"validators overlapped: {intervals}"

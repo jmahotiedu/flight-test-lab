@@ -73,8 +73,14 @@ int main(int argc, char** argv) {
     // "--verbose", which is a silent misconfiguration rather than the usage
     // error it plainly is. A value that looks like an option is treated as a
     // missing value, matching argparse.
+    //
+    // "-h" counts, because this binary's own help advertises it — checking
+    // only the "--" prefix left `--log-file -h` creating a file named "-h".
+    // A bare "-" or a negative number does not: `--fault-delay-ms -5` has to
+    // reach the range check that reports it properly.
+    const std::string& next = i + 1 < args.size() ? args[i + 1] : flag;
     const bool looks_like_flag =
-        i + 1 < args.size() && args[i + 1].rfind("--", 0) == 0;
+        i + 1 < args.size() && (next.rfind("--", 0) == 0 || next == "-h");
     const bool has_value = i + 1 < args.size() && !looks_like_flag;
 
     if (flag == "-h" || flag == "--help") {

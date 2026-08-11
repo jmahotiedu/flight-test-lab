@@ -111,7 +111,9 @@ def _run_steps(
                 continue
             try:
                 payload = json.loads(line)
-            except json.JSONDecodeError:
+            # The DUT under test may be the learner's own edit, so its
+            # reply can fail to decode in any of json's ways.
+            except (ValueError, RecursionError):
                 if step.get("expect_invalid_json"):
                     continue
                 failures.append(f"{label}: response was not valid JSON: {line!r}")

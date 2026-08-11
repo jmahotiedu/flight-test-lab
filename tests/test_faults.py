@@ -486,3 +486,26 @@ def test_a_delay_the_platform_cannot_represent_is_rejected(tmp_path: Path) -> No
     )
     assert result.returncode != 0
     assert "at most" in (result.stderr or result.stdout)
+
+
+@pytest.mark.requirement("REQ-FAULT-001")
+def test_a_duplicate_key_makes_the_manifest_ambiguous(tmp_path: Path) -> None:
+    """json.loads keeps the last occurrence silently.
+
+    So `{"drop_connection": true, "drop_connection": false}` launched a clean
+    DUT from a file that visibly requests the fault. The request protocol keeps
+    last-wins on purpose — both DUTs must agree what a duplicated field means —
+    but a config file is the written record of what an experiment was supposed
+    to do, and an ambiguous one makes its evidence irreproducible.
+    """
+    from simulator.simulator import load_fault_config
+
+    path = tmp_path / "fault.json"
+    path.write_text(
+        '{"drop_connection": true, "drop_connection": false}', encoding="utf-8"
+    )
+    with pytest.raises(SystemExit, match="duplicate key 'drop_connection'"):
+        load_fault_config(path)
+
+    path.write_text('{"drop_connection": true}', encoding="utf-8")
+    assert load_fault_config(path).drop_connection is True

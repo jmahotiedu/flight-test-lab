@@ -285,7 +285,10 @@ def run(args: dict[str, Any], context: ValidatorContext) -> CheckResult:
     if isinstance(json_fields, dict) and text:
         try:
             document = json.loads(text)
-        except json.JSONDecodeError as exc:
+        # A learner-written artifact is arbitrary input: an oversized
+        # integer raises ValueError and deep nesting RecursionError,
+        # neither of which is a JSONDecodeError.
+        except (ValueError, RecursionError) as exc:
             failures.append(f"{relative} is not valid JSON ({exc})")
         else:
             if not isinstance(document, dict):

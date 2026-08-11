@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import random
+import threading
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -53,6 +54,15 @@ class LearningServer(ThreadingHTTPServer):
         self.curriculum = curriculum
         self.progress = progress
         self.context = context
+        # One validator at a time. ThreadingHTTPServer runs each request in its
+        # own thread, and validators are not independent of each other: Day
+        # 11's verify-configure writes cpp/build while verify-build reads and
+        # writes the same tree, and pytest_check runs the repository's own
+        # suite. Two Verify buttons, two tabs, or a double-click would have
+        # them racing over one checkout and reporting failures that are
+        # artefacts of the collision. Disabling a DOM button cannot fix this;
+        # it is not the same document.
+        self.validator_lock = threading.Lock()
 
 
 def build_server(
@@ -158,7 +168,12 @@ class LearningHandler(BaseHTTPRequestHandler):
             return None
         try:
             data = json.loads(self.rfile.read(length))
-        except json.JSONDecodeError:
+        # ValueError covers JSONDecodeError and the oversized-integer error
+        # CPython raises past its digit limit; RecursionError comes from
+        # deep nesting and is neither. Both used to escape the request
+        # thread, so the client got a closed connection instead of the
+        # documented 400 and the page waited forever.
+        except (ValueError, RecursionError):
             return None
         return data if isinstance(data, dict) else None
 
@@ -547,7 +562,14 @@ class LearningHandler(BaseHTTPRequestHandler):
             return
         crashed = False
         try:
-            result = run_validator(verify_block["validator"], args, self.server.context)
+            # Held for the whole run: validators share one checkout, so they
+            # have to take turns. Queuing is the right behaviour rather than
+            # refusing — a learner who clicks twice wants both answers, just
+            # not both at once.
+            with self.server.validator_lock:
+                result = run_validator(
+                    verify_block["validator"], args, self.server.context
+                )
         except Exception as exc:  # noqa: BLE001 - a crash must still answer
             # Without this the exception unwinds out of do_POST, the connection
             # closes with no body, and the page sits on "Running…" forever —

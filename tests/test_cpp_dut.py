@@ -735,3 +735,59 @@ def test_cpp_dut_rejects_an_option_missing_its_value(
     )
     assert result.returncode == 2
     assert f"{flag} requires a value" in result.stderr
+
+
+@pytest.mark.requirement("REQ-CPP-001")
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="terminate() is TerminateProcess on Windows, so the graceful "
+    "shutdown path cannot be reached from here; CI exercises it on Linux",
+)
+@pytest.mark.parametrize("fault", [None, "hang"])
+def test_cpp_dut_shuts_down_with_a_client_connected(
+    cpp_dut_binary: Path, fault: str | None
+) -> None:
+    """Handlers must not outlive the resources they use.
+
+    Detached threads let a handler sit in recv() while run_server returned and
+    WinsockGuard — plus the process-wide logging globals — began destruction.
+    They are joined now, with a grace period: the hang fault blocks a handler
+    forever on purpose, so waiting is not an option and neither is destroying
+    Winsock underneath it. Both endings have to be prompt.
+    """
+    port = reserve_local_port()
+    argv = [str(cpp_dut_binary), "--host", "127.0.0.1", "--port", str(port)]
+    if fault:
+        argv += ["--fault", fault, "--fault-after", "1"]
+    process = subprocess.Popen(
+        argv,
+        cwd=str(REPO_ROOT),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        _wait_for_accept("127.0.0.1", port)
+        connection = socket.create_connection(("127.0.0.1", port), timeout=5)
+        connection.sendall(b'{"command": "status", "sequence": 1}\n')
+        if not fault:
+            connection.makefile("rb").readline()
+        else:
+            time.sleep(0.5)  # let the handler reach the deadlock
+
+        started = time.monotonic()
+        process.terminate()
+        exit_code = process.wait(timeout=20)
+        elapsed = time.monotonic() - started
+        stderr = process.stderr.read() if process.stderr else ""
+    finally:
+        connection.close()
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=10)
+
+    assert elapsed < 10, f"shutdown took {elapsed:.1f}s"
+    assert exit_code == 0, stderr[-400:]
+    assert "dut_stopped" in stderr
+    if fault == "hang":
+        assert "handler_still_running" in stderr

@@ -25,7 +25,9 @@ def _load_state(repo_root: Path) -> dict[str, Any]:
         return {}
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    # Same widening as ProgressStore._load: an undecodable progress file is
+    # an absent one here, never a crash inside a check.
+    except (OSError, ValueError, RecursionError):
         return {}
     return data if isinstance(data, dict) else {}
 

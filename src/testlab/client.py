@@ -117,7 +117,11 @@ class LabClient:
 
         try:
             payload = json.loads(line)
-        except json.JSONDecodeError as exc:
+        # The DUT is the thing under test, so its reply is untrusted: an
+        # oversized integer raises ValueError and deep nesting
+        # RecursionError. A learner's test should see this library's
+        # documented error, not a decoder exception from inside it.
+        except (ValueError, RecursionError) as exc:
             raise LabCommunicationError(f"DUT returned invalid JSON: {line!r}") from exc
 
         if not isinstance(payload, dict):
