@@ -115,7 +115,10 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  dut::configure_logging(log_file, verbose);
+  if (!dut::configure_logging(log_file, verbose)) {
+    std::cerr << "--log-file could not be opened: " << log_file << "\n";
+    return 1;
+  }
   std::signal(SIGINT, handle_signal);
   std::signal(SIGTERM, handle_signal);
 

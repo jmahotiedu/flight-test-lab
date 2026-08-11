@@ -265,6 +265,151 @@ def test_artifact_check_accepts_a_filled_in_manifest(tmp_path: Path) -> None:
     assert result.passed, result.interpretation
 
 
+def test_requirement_marker_must_be_a_real_decorator(tmp_path: Path) -> None:
+    """The ID in a comment or docstring is not a requirement link.
+
+    Matching raw text lets a lesson certify a test with no marker at all,
+    which is exactly the dangling-reference problem the marker exists to
+    prevent.
+    """
+    decoy = tmp_path / "test_decoy.py"
+    decoy.write_text(
+        '"""Covers REQ-PROTO-001 (allegedly)."""\n\n'
+        "# REQ-PROTO-001 is handled below\n"
+        "def test_thing():\n"
+        "    assert True\n",
+        encoding="utf-8",
+    )
+    result = run_validator(
+        "source_check",
+        {
+            "file": str(decoy),
+            "must_have_requirement_marker": "REQ-PROTO-001",
+        },
+        ValidatorContext(repo_root=tmp_path),
+    )
+    assert not result.passed
+    assert "no test function decorated" in result.interpretation
+
+    real = tmp_path / "test_real.py"
+    real.write_text(
+        "import pytest\n\n\n"
+        '@pytest.mark.requirement("REQ-PROTO-001")\n'
+        "def test_thing():\n"
+        "    assert True\n",
+        encoding="utf-8",
+    )
+    ok = run_validator(
+        "source_check",
+        {"file": str(real), "must_have_requirement_marker": "REQ-PROTO-001"},
+        ValidatorContext(repo_root=tmp_path),
+    )
+    assert ok.passed, ok.interpretation
+
+
+def test_junit_evidence_requires_the_expected_outcome(tmp_path: Path) -> None:
+    """A recorded name is not a recorded result."""
+    report = tmp_path / "results.xml"
+    report.write_text(
+        '<?xml version="1.0"?><testsuite name="s" tests="1">'
+        '<testcase name="test_thing"><failure message="boom"/></testcase>'
+        "</testsuite>",
+        encoding="utf-8",
+    )
+    context = ValidatorContext(repo_root=tmp_path)
+
+    as_pass = run_validator(
+        "artifact_check",
+        {"file": str(report), "junit_testcase": "test_thing"},
+        context,
+    )
+    assert not as_pass.passed
+    assert "expected passed" in as_pass.interpretation
+
+    as_fail = run_validator(
+        "artifact_check",
+        {
+            "file": str(report),
+            "junit_testcase": "test_thing",
+            "junit_outcome": "failed",
+        },
+        context,
+    )
+    assert as_fail.passed, as_fail.interpretation
+
+
+def test_csv_row_matches_requires_one_row_to_satisfy_every_column(
+    tmp_path: Path,
+) -> None:
+    """A requirement id in one row must not borrow evidence from another."""
+    csv_path = tmp_path / "traceability.csv"
+    csv_path.write_text(
+        "requirement_id,test_case,evidence\n"
+        "REQ-A,tests/test_a.py::test_a,evidence/junit/test-results.xml\n"
+        "REQ-B,tests/test_b.py::test_b,evidence/logs/dut.log\n",
+        encoding="utf-8",
+    )
+    context = ValidatorContext(repo_root=tmp_path)
+
+    wrong_pairing = run_validator(
+        "artifact_check",
+        {
+            "file": str(csv_path),
+            "csv_row_matches": {
+                "requirement_id": "^REQ-B$",
+                "evidence": r"^evidence/junit/test-results\.xml$",
+            },
+        },
+        context,
+    )
+    assert not wrong_pairing.passed
+
+    correct = run_validator(
+        "artifact_check",
+        {
+            "file": str(csv_path),
+            "csv_row_matches": {
+                "requirement_id": "^REQ-A$",
+                "test_case": r"^tests/test_a\.py::test_a$",
+                "evidence": r"^evidence/junit/test-results\.xml$",
+            },
+        },
+        context,
+    )
+    assert correct.passed, correct.interpretation
+
+
+def test_red_stage_rejects_a_collection_error(tmp_path: Path) -> None:
+    """ "Fails first" has to mean the assertion ran, not that pytest exited 1.
+
+    A fixture typo or bad import is also nonzero and still records the case in
+    the report — as an <error>, which proves nothing about the behaviour.
+    """
+    broken = tmp_path / "test_broken.py"
+    broken.write_text(
+        "import pytest\n\n\n"
+        "@pytest.fixture\n"
+        "def thing():\n"
+        "    raise RuntimeError('setup exploded')\n\n\n"
+        "def test_ping(thing):\n"
+        "    assert thing == 'pong'\n",
+        encoding="utf-8",
+    )
+    result = run_validator(
+        "pytest_check",
+        {
+            "nodeids": [str(broken)],
+            "expect": "fail",
+            "junit_contains": ["ping"],
+            "require_assertion_failure": True,
+            "timeout_seconds": 60,
+        },
+        CONTEXT,
+    )
+    assert not result.passed
+    assert "errored during collection or setup" in result.interpretation
+
+
 def test_source_check_path_escape_rejected() -> None:
     with pytest.raises(ValueError, match="escapes"):
         run_validator(

@@ -24,6 +24,36 @@ def _resolve_repo_path(repo_root: Path, relative: str) -> Path:
     return candidate
 
 
+def _marked_functions(tree: ast.AST, requirement: str) -> list[str]:
+    """Names of test functions carrying @pytest.mark.requirement(<requirement>).
+
+    Only a real decorator counts.  Matching the raw text would accept the ID
+    written in a comment, a docstring or an unrelated string constant, none of
+    which links a test to anything.
+    """
+    marked: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            continue
+        for decorator in node.decorator_list:
+            if not isinstance(decorator, ast.Call):
+                continue
+            target = decorator.func
+            # pytest.mark.requirement(...) — check the attribute chain ends in
+            # `.mark.requirement`, however pytest was imported or aliased.
+            if not (
+                isinstance(target, ast.Attribute)
+                and target.attr == "requirement"
+                and isinstance(target.value, ast.Attribute)
+                and target.value.attr == "mark"
+            ):
+                continue
+            for argument in decorator.args:
+                if isinstance(argument, ast.Constant) and argument.value == requirement:
+                    marked.append(node.name)
+    return marked
+
+
 def run(args: dict[str, Any], context: ValidatorContext) -> CheckResult:
     relative = args.get("file")
     if not isinstance(relative, str) or not relative:
@@ -66,10 +96,21 @@ def run(args: dict[str, Any], context: ValidatorContext) -> CheckResult:
                 )
 
     marker_requirement = args.get("must_have_requirement_marker")
-    if isinstance(marker_requirement, str) and text and marker_requirement not in text:
-        failures.append(
-            f"{relative} has no test marked with requirement {marker_requirement!r}"
-        )
+    if isinstance(marker_requirement, str) and text:
+        # Parse the decorators rather than searching the text: the ID appearing
+        # in a comment or a docstring is not a marker, and a check that accepts
+        # it certifies a test with no requirement linkage at all.
+        try:
+            tree = ast.parse(text)
+        except SyntaxError as exc:
+            failures.append(f"{relative} does not parse as Python: {exc}")
+        else:
+            if not _marked_functions(tree, marker_requirement):
+                failures.append(
+                    f"{relative} has no test function decorated with "
+                    f"@pytest.mark.requirement({marker_requirement!r}) — the ID "
+                    "appearing in a comment or string does not link anything"
+                )
 
     passed = not failures
     if passed:

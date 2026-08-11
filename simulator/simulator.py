@@ -16,6 +16,14 @@ from typing import Any
 
 LOGGER = logging.getLogger("synthetic_dut")
 
+# Maximum container nesting accepted in a request.  A protocol needs an
+# explicit bound: without one, a deeply nested line makes json.loads raise
+# RecursionError — which is not a JSONDecodeError, so it would escape the
+# handler and kill the connection thread instead of returning INVALID_JSON.
+# The C++ DUT enforces the same number (cpp/src/json.cpp, kMaxDepth) so a
+# payload cannot mean different things to the two implementations.
+MAX_NESTING_DEPTH = 100
+
 
 @dataclass(frozen=True, slots=True)
 class FaultConfig:
@@ -100,6 +108,13 @@ def resolve_fault_config(args: argparse.Namespace) -> FaultConfig:
     if args.fault_config is not None:
         return load_fault_config(args.fault_config)
     delay = int(args.fault_delay_ms)
+    # A negative delay silently disables the fault at both runtime guards
+    # (`> 0` checks), so the run looks clean while the requested fault never
+    # engaged. The config-file path already rejects negatives; the CLI has to
+    # agree, or the same mistake is fatal in one place and invisible in the
+    # other.
+    if delay < 0:
+        raise SystemExit("--fault-delay-ms must not be negative")
     presets = {
         "delayed_response": FaultConfig(response_delay_ms=delay),
         "dropped_connection": FaultConfig(drop_connection=True),
@@ -110,6 +125,42 @@ def resolve_fault_config(args: argparse.Namespace) -> FaultConfig:
     if args.fault is None:
         return FaultConfig()
     return presets[str(args.fault)]
+
+
+def exceeds_nesting_limit(value: object, limit: int = MAX_NESTING_DEPTH) -> bool:
+    """True when ``value`` nests deeper than the protocol allows.
+
+    Walked iteratively rather than recursively: a recursive check on a
+    hostile payload would hit the same RecursionError this limit exists to
+    prevent.
+    """
+    stack: list[tuple[object, int]] = [(value, 1)]
+    while stack:
+        current, depth = stack.pop()
+        if depth > limit:
+            return True
+        if isinstance(current, dict):
+            stack.extend((item, depth + 1) for item in current.values())
+        elif isinstance(current, list):
+            stack.extend((item, depth + 1) for item in current)
+    return False
+
+
+def decode_request(raw_line: str) -> tuple[object | None, bool]:
+    """Decode one request line; return (message, ok).
+
+    ``ok`` is False for anything the protocol rejects outright — malformed
+    JSON, or nesting past MAX_NESTING_DEPTH.  RecursionError is caught
+    alongside JSONDecodeError because json.loads raises it on deeply nested
+    input, and an uncaught one would take the connection thread down.
+    """
+    try:
+        message = json.loads(raw_line)
+    except (json.JSONDecodeError, RecursionError):
+        return None, False
+    if exceeds_nesting_limit(message):
+        return None, False
+    return message, True
 
 
 def build_response(message: object) -> dict[str, Any]:
@@ -174,9 +225,8 @@ class DutRequestHandler(socketserver.StreamRequestHandler):
                 )
                 return
 
-            try:
-                message = json.loads(raw_line)
-            except json.JSONDecodeError:
+            message, decoded = decode_request(raw_line)
+            if not decoded:
                 response: dict[str, Any] = {
                     "status": "error",
                     "error_code": "INVALID_JSON",

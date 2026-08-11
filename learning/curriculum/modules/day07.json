@@ -129,11 +129,15 @@
           "id": "v-trace",
           "validator": "artifact_check",
           "mandatory": true,
-          "description": "Checks the traceability map names REQ-LEARN-001 — the requirement must be linked to a test and an evidence file.",
+          "description": "Parses traceability.csv and requires a real row: REQ-LEARN-001 in the requirement column, a test node ID naming your new test, and the JUnit evidence path. The ID appearing anywhere in the file is not a map.",
           "args": {
             "file": "requirements/traceability.csv",
-            "contains": ["REQ-LEARN-001"],
-            "success_note": "The map row exists: requirement -> test node ID -> evidence/junit/test-results.xml."
+            "csv_row_matches": {
+              "requirement_id": "^REQ-LEARN-001$",
+              "test_case": "^tests/test_sequence_echo\\.py::\\S*sequence_echo\\S*$",
+              "evidence": "^evidence/junit/test-results\\.xml$"
+            },
+            "success_note": "The map row is complete and well-formed: REQ-LEARN-001 -> your test node ID -> evidence/junit/test-results.xml."
           }
         },
         {
@@ -214,7 +218,8 @@
           "args": {
             "file": "evidence/junit/test-results.xml",
             "junit_testcase": "test_status_request_returns_ready",
-            "success_note": "The evidence exists and contains a real executed testcase — the deliverable an auditor would ask for."
+            "junit_outcome": "passed",
+            "success_note": "The evidence exists and records test_status_request_returns_ready as a passing result — not just a name in a report. That is the deliverable an auditor would ask for."
           }
         },
         {

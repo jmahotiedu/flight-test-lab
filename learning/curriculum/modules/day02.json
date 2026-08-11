@@ -171,7 +171,10 @@
           "args": {
             "nodeids": ["tests/test_ping.py"],
             "expect": "fail",
-            "junit_contains": ["ping"]
+            "junit_contains": ["ping"],
+            "require_assertion_failure": true,
+            "expect_stdout_regex": "UNSUPPORTED_COMMAND",
+            "success_note": "Red for the right reason: the test ran, reached its assertion, and the diff shows the DUT answered UNSUPPORTED_COMMAND. A collection or fixture error would have been nonzero too and proved nothing."
           }
         },
         {

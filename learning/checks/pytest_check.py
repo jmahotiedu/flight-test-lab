@@ -23,22 +23,25 @@ from learning.server.validators import (
 )
 
 
-def _junit_test_names(junit_path: Path) -> tuple[set[str], set[str]]:
-    """Return (all testcase names, names that were skipped).
+def _junit_test_names(junit_path: Path) -> tuple[set[str], set[str], set[str]]:
+    """Return (all testcase names, skipped names, assertion-failed names).
 
-    Skips matter: a run where every test skipped still exits 0, and the
-    testcases still appear in the report. Treating that as a pass would let a
-    lesson certify work that never executed — for instance the C++ parity
-    tests on a machine where cpp/build was never built.
+    The three are different evidence.  A run where every test skipped still
+    exits 0 with the cases present in the report, so treating a name as a pass
+    would certify work that never executed.  And a test that *errors* during
+    collection or setup also exits nonzero while proving nothing about the
+    behaviour — so a "fails first" stage has to distinguish <failure> from
+    <error>.
     """
     if not junit_path.exists():
-        return set(), set()
+        return set(), set(), set()
     try:
         tree = ET.parse(junit_path)
     except ET.ParseError:
-        return set(), set()
+        return set(), set(), set()
     names: set[str] = set()
     skipped: set[str] = set()
+    failed: set[str] = set()
     for testcase in tree.getroot().iter("testcase"):
         name = testcase.get("name")
         if not name:
@@ -46,7 +49,9 @@ def _junit_test_names(junit_path: Path) -> tuple[set[str], set[str]]:
         names.add(name)
         if testcase.find("skipped") is not None:
             skipped.add(name)
-    return names, skipped
+        if testcase.find("failure") is not None:
+            failed.add(name)
+    return names, skipped, failed
 
 
 def run(args: dict[str, Any], context: ValidatorContext) -> CheckResult:
@@ -64,6 +69,7 @@ def run(args: dict[str, Any], context: ValidatorContext) -> CheckResult:
     if not isinstance(junit_contains, list):
         raise ValueError("pytest_check 'junit_contains' must be a list")
     stdout_pattern = args.get("expect_stdout_regex")
+    require_failure_not_error = bool(args.get("require_assertion_failure", False))
     timeout = clamp_timeout(args)
     extra_pytest_args = args.get("pytest_args", [])
     if not isinstance(extra_pytest_args, list) or not all(
@@ -107,7 +113,7 @@ def run(args: dict[str, Any], context: ValidatorContext) -> CheckResult:
         elif expect == "fail" and exit_status == 0:
             failures.append("expected at least one test failure, but pytest exited 0")
 
-        test_names, skipped_names = _junit_test_names(junit_path)
+        test_names, skipped_names, failed_names = _junit_test_names(junit_path)
         for expected_name in junit_contains:
             if not isinstance(expected_name, str):
                 continue
@@ -121,6 +127,18 @@ def run(args: dict[str, Any], context: ValidatorContext) -> CheckResult:
                 failures.append(
                     f"every test matching {expected_name!r} was skipped, so "
                     "nothing was actually verified"
+                )
+            elif require_failure_not_error and not any(
+                name in failed_names for name in matching
+            ):
+                # A red stage has to be red for the *right* reason.  A fixture
+                # typo or an import error also exits nonzero and still writes
+                # the testcase into the report — as a <error>, not a <failure>
+                # — which proves the test never observed the behaviour.
+                failures.append(
+                    f"{expected_name!r} did not fail as a test: it errored "
+                    "during collection or setup, which proves nothing about "
+                    "the behaviour under test"
                 )
         if isinstance(stdout_pattern, str) and not re.search(stdout_pattern, stdout):
             failures.append(f"pytest output did not match /{stdout_pattern}/")
@@ -152,5 +170,6 @@ def run(args: dict[str, Any], context: ValidatorContext) -> CheckResult:
         details={
             "junit_testcases": sorted(test_names),
             "skipped": sorted(skipped_names),
+            "failed": sorted(failed_names),
         },
     )

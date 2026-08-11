@@ -3,10 +3,12 @@
 #include <chrono>
 #include <cstdio>
 #include <ctime>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <mutex>
 #include <string>
+#include <system_error>
 
 namespace dut {
 namespace {
@@ -43,18 +45,33 @@ std::string utc_timestamp() {
 
 }  // namespace
 
-void configure_logging(const std::string& log_file, bool verbose) {
+bool configure_logging(const std::string& log_file, bool verbose) {
   std::lock_guard<std::mutex> guard(g_log_mutex);
   g_verbose = verbose;
   if (log_file.empty()) {
-    return;
+    return true;
   }
+
+  // Create the parent directory, as the Python DUT does — a harness that
+  // passes evidence/logs/dut.log should not have to pre-create the tree.
+  std::error_code error;
+  const std::filesystem::path parent =
+      std::filesystem::path(log_file).parent_path();
+  if (!parent.empty()) {
+    std::filesystem::create_directories(parent, error);
+  }
+
   g_log_file.open(log_file, std::ios::app);
   if (!g_log_file.is_open()) {
+    // Continuing without the log would serve requests happily while losing
+    // the evidence the operator explicitly asked for, so this is fatal —
+    // matching the Python DUT, whose FileHandler raises.
     std::cerr << utc_timestamp()
               << " level=ERROR message=log_file_unavailable path=" << log_file
               << '\n';
+    return false;
   }
+  return true;
 }
 
 void log_message(Level level, const std::string& message) {

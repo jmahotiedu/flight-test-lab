@@ -239,6 +239,35 @@ def _run_gdb_attach(
     )
 
 
+def _incompatible_cached_compiler(context: ValidatorContext) -> str | None:
+    """Reject a cached build tree the debugging lessons cannot use.
+
+    Leaving an existing tree alone is right in general — CMake cannot switch
+    generators in place, and fighting the learner's own configure would be
+    absurd.  But if that cache pins MSVC while gdb is what unlocked Days 11-12,
+    every Day 11 check would pass and every Day 12 check would fail on symbols
+    GDB cannot read.  Better to say so here, where the remedy is one command.
+    """
+    cache = context.repo_root / "cpp" / "build" / "CMakeCache.txt"
+    if not cache.is_file() or not cached_toolchain().gdb:
+        return None
+    for line in cache.read_text(encoding="utf-8", errors="replace").splitlines():
+        if not line.startswith("CMAKE_CXX_COMPILER:"):
+            continue
+        compiler = line.split("=", 1)[-1].strip().replace("\\", "/").lower()
+        name = compiler.rsplit("/", 1)[-1]
+        if any(token in name for token in ("g++", "gcc", "clang", "c++")):
+            return None
+        return (
+            f"cpp/build was configured with {compiler or 'an unknown compiler'}, "
+            "whose debug symbols GDB cannot read — the Day 12 checks would fail "
+            "on it. That directory is entirely generated, so delete it and let "
+            "this check reconfigure with the detected GNU toolchain: "
+            "rm -rf cpp/build (PowerShell: Remove-Item -Recurse -Force cpp/build)"
+        )
+    return None
+
+
 def _configure_argv(cmake: str, context: ValidatorContext) -> list[str]:
     """cmake configure arguments, pinned to the detected toolchain when new.
 
@@ -257,6 +286,7 @@ def _configure_argv(cmake: str, context: ValidatorContext) -> list[str]:
         return argv
 
     toolchain = cached_toolchain()
+
     if toolchain.cxx:
         argv.append(f"-DCMAKE_CXX_COMPILER={toolchain.cxx}")
     if toolchain.ninja:
@@ -282,6 +312,9 @@ def run(args: dict[str, Any], context: ValidatorContext) -> CheckResult:
         return _fail(tool, error)
 
     if tool == "cmake-configure":
+        incompatible = _incompatible_cached_compiler(context)
+        if incompatible is not None:
+            return _fail("cmake-configure", incompatible)
         argv = _configure_argv(executable, context)
     else:
         argv = [executable, *[str(item) for item in args.get("args", [])]]

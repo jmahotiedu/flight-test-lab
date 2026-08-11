@@ -75,6 +75,62 @@ def test_structurally_invalid_state_is_backed_up_and_reset(
     assert path.with_suffix(".corrupt.json").exists(), "damaged state was not preserved"
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        '{"version": 1, "concepts": {"timing": {"correct": "bad"}}}',
+        '{"version": 1, "lessons": {"l1": {"attempts": "many"}}}',
+        '{"version": 1, "lessons": {"l1": {"steps_done": "not-a-list"}}}',
+        '{"version": 1, "lessons": {"l1": {"validations": {"v": "nope"}}}}',
+        '{"version": 1, "interview": {"q1": {"correct": null, "incorrect": []}}}',
+    ],
+)
+def test_records_with_wrong_field_types_are_reset(tmp_path: Path, payload: str) -> None:
+    """Right shape, wrong field types must still take the recovery path.
+
+    These files pass an outer type check and then raise much later — inside a
+    request handler, when the value is used as an int or a list — which is a
+    broken dashboard rather than the documented back-up-and-reset.
+    """
+    path = tmp_path / "progress.json"
+    path.write_text(payload, encoding="utf-8")
+
+    store = ProgressStore(path)
+
+    assert store.snapshot()["lessons"] == {}
+    assert store.snapshot()["concepts"] == {}
+    assert path.with_suffix(".corrupt.json").exists()
+
+
+def test_a_failing_recheck_revokes_completion(tmp_path: Path) -> None:
+    """Re-running a mandatory check that now fails must un-complete the lesson.
+
+    lesson_completion() already reports the missing gate, but the roadmap,
+    /api/state and prerequisite unlocking read the stored status — so leaving
+    it "complete" would keep certifying work that has since regressed.
+    """
+    lesson = _lesson()
+    store = ProgressStore(tmp_path / "progress.json")
+    for block in lesson.mandatory_validators():
+        store.record_validation(lesson.id, block["id"], True)
+    for block_id in lesson.required_quiz_ids():
+        store.record_quiz(lesson.id, block_id, True, lesson.concepts)
+    for block_id in lesson.required_explain_ids():
+        store.record_explain(lesson.id, block_id, True, lesson.concepts)
+    complete, _ = store.mark_complete(lesson)
+    assert complete
+    assert store.snapshot()["lessons"][lesson.id]["status"] == "complete"
+
+    failing = lesson.mandatory_validators()[0]["id"]
+    store.record_validation(lesson.id, failing, False)
+
+    record = store.snapshot()["lessons"][lesson.id]
+    assert record["status"] == "in_progress"
+    assert record["completed_at"] is None
+    still_complete, missing = store.lesson_completion(lesson)
+    assert not still_complete and missing
+
+
 def test_completion_requires_mandatory_validation(tmp_path: Path) -> None:
     store = ProgressStore(tmp_path / "progress.json")
     lesson = _lesson()

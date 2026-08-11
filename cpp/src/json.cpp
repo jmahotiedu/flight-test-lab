@@ -24,7 +24,11 @@ class Parser {
 
   std::optional<Value> parse_document() {
     skip_whitespace();
-    std::optional<Value> value = parse_value(0);
+    // The document's own value counts as depth 1, matching how the Python
+    // side measures it (simulator.exceeds_nesting_limit walks from depth 1).
+    // Starting at 0 here would let the native DUT accept exactly one level
+    // more than Python, so the two would disagree at the boundary.
+    std::optional<Value> value = parse_value(1);
     if (!value) {
       return std::nullopt;
     }
@@ -36,7 +40,13 @@ class Parser {
   }
 
  private:
-  static constexpr int kMaxDepth = 32;
+  // The protocol's documented nesting limit, enforced identically by the
+  // Python DUT (simulator.MAX_NESTING_DEPTH).  Some bound is required — an
+  // unbounded recursive parser is a stack-overflow waiting for a hostile
+  // line, and Python's own json blows up with RecursionError — but the two
+  // implementations have to reject at the *same* depth, or a payload's
+  // meaning would depend on which DUT answered it.
+  static constexpr int kMaxDepth = 100;
 
   void skip_whitespace() {
     while (position_ < text_.size()) {
@@ -463,12 +473,17 @@ void dump_string(std::ostringstream& out, const std::string& text) {
   out << '"';
 }
 
-// Reproduces Python's float repr, which is what json.dumps emits: the shortest
-// decimal string that round-trips, with a ".0" forced onto integral values so
-// 1.5e3 prints as 1500.0 and not 1500.  std::to_chars gives the same shortest
-// round-trip digits; only the trailing ".0" has to be added by hand.
-// Non-finite values follow Python's json, which emits the JavaScript spellings
-// rather than failing.
+// Reproduces Python's float repr, which is what json.dumps emits.
+//
+// Shortest round-trip digits are necessary but not sufficient: Python also
+// picks *which notation* by decimal exponent, and bare std::to_chars picks a
+// different one.  Python uses positional notation while -4 <= exp < 16 and
+// scientific outside it, so 1e6 prints as 1000000.0 (to_chars: 1e+06) and
+// 1.2345678901234567e20 stays scientific (to_chars expands it).  An integral
+// value in positional form gets a ".0" so it stays a float on the wire.
+//
+// Non-finite values follow Python's json, which emits the JavaScript
+// spellings rather than failing.
 std::string format_double(double value) {
   if (std::isnan(value)) {
     return "NaN";
@@ -476,13 +491,30 @@ std::string format_double(double value) {
   if (std::isinf(value)) {
     return value > 0 ? "Infinity" : "-Infinity";
   }
-  char buffer[64];
-  const std::to_chars_result result =
-      std::to_chars(buffer, buffer + sizeof(buffer), value);
-  std::string text(buffer, result.ptr);
-  if (text.find('.') == std::string::npos &&
-      text.find('e') == std::string::npos &&
-      text.find('E') == std::string::npos) {
+
+  // Shortest scientific form first: it is the cheapest way to learn the
+  // decimal exponent that decides the notation.
+  char scientific[64];
+  const std::to_chars_result sci = std::to_chars(
+      scientific, scientific + sizeof(scientific), value,
+      std::chars_format::scientific);
+  const std::string sci_text(scientific, sci.ptr);
+
+  int exponent = 0;
+  const std::size_t marker = sci_text.find('e');
+  if (marker != std::string::npos) {
+    exponent = std::atoi(sci_text.c_str() + marker + 1);
+  }
+
+  if (exponent < -4 || exponent >= 16) {
+    return sci_text;  // to_chars already spells this as Python does
+  }
+
+  char fixed[350];  // 5e-324 in positional form is the widest case
+  const std::to_chars_result plain = std::to_chars(
+      fixed, fixed + sizeof(fixed), value, std::chars_format::fixed);
+  std::string text(fixed, plain.ptr);
+  if (text.find('.') == std::string::npos) {
     text += ".0";
   }
   return text;
@@ -642,45 +674,59 @@ std::string sanitize_utf8(const std::string& text) {
 
   while (index < size) {
     const unsigned char lead = byte(0);
-    std::size_t length = 0;
 
     if (lead < 0x80) {
-      length = 1;
-    } else if (lead >= 0xC2 && lead <= 0xDF) {
-      length = in_range(1, 0x80, 0xBF) ? 2 : 0;
-    } else if (lead == 0xE0) {
-      length = in_range(1, 0xA0, 0xBF) && in_range(2, 0x80, 0xBF) ? 3 : 0;
-    } else if (lead == 0xED) {
-      // Excludes D800-DFFF: surrogates are not valid UTF-8.
-      length = in_range(1, 0x80, 0x9F) && in_range(2, 0x80, 0xBF) ? 3 : 0;
-    } else if ((lead >= 0xE1 && lead <= 0xEC) || lead == 0xEE || lead == 0xEF) {
-      length = in_range(1, 0x80, 0xBF) && in_range(2, 0x80, 0xBF) ? 3 : 0;
-    } else if (lead == 0xF0) {
-      length = in_range(1, 0x90, 0xBF) && in_range(2, 0x80, 0xBF) &&
-                       in_range(3, 0x80, 0xBF)
-                   ? 4
-                   : 0;
-    } else if (lead >= 0xF1 && lead <= 0xF3) {
-      length = in_range(1, 0x80, 0xBF) && in_range(2, 0x80, 0xBF) &&
-                       in_range(3, 0x80, 0xBF)
-                   ? 4
-                   : 0;
-    } else if (lead == 0xF4) {
-      length = in_range(1, 0x80, 0x8F) && in_range(2, 0x80, 0xBF) &&
-                       in_range(3, 0x80, 0xBF)
-                   ? 4
-                   : 0;
-    }
-
-    if (length == 0) {
-      // One replacement per maximal subpart: 0xC0 0xAF is two bad bytes and
-      // therefore two replacement characters, exactly as Python reports it.
-      out += "\xEF\xBF\xBD";
+      out.push_back(text[index]);
       index += 1;
       continue;
     }
-    out.append(text, index, length);
-    index += length;
+
+    // Expected length and the byte range the *second* byte must fall in.  The
+    // second-byte ranges are narrower than 80-BF for three leads: 0xE0 (would
+    // otherwise be overlong), 0xED (would otherwise encode a surrogate),
+    // 0xF0 (overlong) and 0xF4 (beyond U+10FFFF).
+    std::size_t expected = 0;
+    unsigned char second_low = 0x80;
+    unsigned char second_high = 0xBF;
+    if (lead >= 0xC2 && lead <= 0xDF) {
+      expected = 2;
+    } else if (lead >= 0xE0 && lead <= 0xEF) {
+      expected = 3;
+      if (lead == 0xE0) {
+        second_low = 0xA0;
+      } else if (lead == 0xED) {
+        second_high = 0x9F;
+      }
+    } else if (lead >= 0xF0 && lead <= 0xF4) {
+      expected = 4;
+      if (lead == 0xF0) {
+        second_low = 0x90;
+      } else if (lead == 0xF4) {
+        second_high = 0x8F;
+      }
+    }
+
+    // How much of a well-formed sequence is actually present.
+    std::size_t valid_prefix = 1;
+    if (expected >= 2 && in_range(1, second_low, second_high)) {
+      valid_prefix = 2;
+      while (valid_prefix < expected && in_range(valid_prefix, 0x80, 0xBF)) {
+        ++valid_prefix;
+      }
+    }
+
+    if (expected != 0 && valid_prefix == expected) {
+      out.append(text, index, expected);
+      index += expected;
+      continue;
+    }
+
+    // One replacement per *maximal subpart*, which is not one per byte: a
+    // sequence that begins validly and is merely cut short ("\xe1\x80" at end
+    // of input) is a single subpart and yields a single U+FFFD from Python.
+    // A byte that can start nothing, such as 0xC0, is a subpart of one.
+    out += "\xEF\xBF\xBD";
+    index += valid_prefix;
   }
   return out;
 }

@@ -62,6 +62,19 @@ PARITY_REQUESTS = (
     '{"command": "status", "sequence": 1.0}',
     '{"command": "status", "sequence": -0.0}',
     '{"command": "status", "sequence": 0.1}',
+    # Python's repr switches to scientific notation outside -4 <= exp < 16.
+    # Shortest-round-trip digits alone do not reproduce that choice: a plain
+    # to_chars prints 1e6 as "1e+06" and expands 1.2345678901234567e20.
+    '{"command": "status", "sequence": 1e6}',
+    '{"command": "status", "sequence": -1e6}',
+    '{"command": "status", "sequence": 1e15}',
+    '{"command": "status", "sequence": 1e16}',
+    '{"command": "status", "sequence": 1e-4}',
+    '{"command": "status", "sequence": 1e-5}',
+    '{"command": "status", "sequence": 123456789012345678.0}',
+    '{"command": "status", "sequence": 1.2345678901234567e20}',
+    '{"command": "status", "sequence": 5e-324}',
+    '{"command": "status", "sequence": 1.7976931348623157e308}',
     '{"command": "status", "sequence": 3.141592653589793}',
     '{"command": "status", "sequence": 1E3}',
     '{"command": "status", "sequence": 1e400}',
@@ -100,6 +113,27 @@ PARITY_BYTE_REQUESTS = (
     pytest.param(b'{"command":"status","sequence":"a\x01b"}', id="raw-control-char"),
     pytest.param(b'{"command":"status","sequence":"a\\tb"}', id="escaped-tab"),
     pytest.param(b'{"command":"status","sequence":"a\x7fb"}', id="del-char"),
+    # A truncated-but-valid prefix is one maximal subpart, so it yields one
+    # replacement character, not one per byte.
+    pytest.param(b'{"command":"status","sequence":"\xe1\x80"}', id="truncated-3byte"),
+    pytest.param(
+        b'{"command":"status","sequence":"\xf0\x9f\x98"}', id="truncated-4byte"
+    ),
+    pytest.param(b'{"command":"status","sequence":"\xe0\x80"}', id="overlong-3byte"),
+    # Nesting: both DUTs accept up to the documented limit and reject beyond,
+    # so a payload cannot mean different things to the two implementations.
+    pytest.param(
+        ('{"command":"status","sequence":' + "[" * 100 + "]" * 100 + "}").encode(),
+        id="nested-at-limit",
+    ),
+    pytest.param(
+        ('{"command":"status","sequence":' + "[" * 101 + "]" * 101 + "}").encode(),
+        id="nested-over-limit",
+    ),
+    pytest.param(
+        ('{"command":"status","sequence":' + "[" * 5000 + "]" * 5000 + "}").encode(),
+        id="nested-absurd",
+    ),
     pytest.param('{"command":"status","sequence":"é😀"}'.encode(), id="non-ascii"),
 )
 

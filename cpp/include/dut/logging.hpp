@@ -11,10 +11,12 @@ namespace dut {
 
 enum class Level { Info, Warning, Error };
 
-// Opens the log file (appending) in addition to stderr.  An unwritable path is
-// reported and then ignored: losing the file log must not stop the DUT, but it
-// must not be silent either.
-void configure_logging(const std::string& log_file, bool verbose);
+// Opens the log file (appending) in addition to stderr, creating its parent
+// directory the way the Python DUT does.  Returns false when the requested
+// file could not be opened, which the caller must treat as fatal: serving
+// while silently discarding the evidence an operator asked for is worse than
+// not serving at all.
+bool configure_logging(const std::string& log_file, bool verbose);
 
 void log_message(Level level, const std::string& message);
 

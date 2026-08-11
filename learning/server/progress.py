@@ -38,6 +38,49 @@ def _empty_state() -> dict[str, Any]:
     }
 
 
+def _record_is_valid(section: str, record: dict[str, Any]) -> bool:
+    """Check the fields a section's records must hold, and their types.
+
+    Missing keys are tolerated (they are filled from the template on use);
+    wrong *types* are not, because those surface much later as an exception
+    inside a request handler instead of the documented back-up-and-reset.
+    """
+    integer_fields: tuple[str, ...]
+    list_fields: tuple[str, ...] = ()
+    if section == "lessons":
+        integer_fields = ("attempts", "hints_used", "quiz_attempts")
+        list_fields = ("steps_done", "quiz_correct", "explain_done")
+    elif section == "concepts" or section == "interview":
+        integer_fields = ("correct", "incorrect")
+    else:
+        return True
+
+    for field in integer_fields:
+        value = record.get(field)
+        if value is not None and (
+            isinstance(value, bool) or not isinstance(value, int)
+        ):
+            return False
+    for field in list_fields:
+        value = record.get(field)
+        if value is not None and (
+            not isinstance(value, list)
+            or not all(isinstance(item, str) for item in value)
+        ):
+            return False
+    if section == "lessons":
+        status = record.get("status")
+        if status is not None and not isinstance(status, str):
+            return False
+        validations = record.get("validations")
+        if validations is not None and (
+            not isinstance(validations, dict)
+            or not all(isinstance(v, dict) for v in validations.values())
+        ):
+            return False
+    return True
+
+
 class ProgressStore:
     """Thread-safe, atomic learner-progress store."""
 
@@ -74,6 +117,14 @@ class ProgressStore:
             if not isinstance(value, dict) or not all(
                 isinstance(k, str) and isinstance(v, dict) for k, v in value.items()
             ):
+                self._backup_locked()
+                return _empty_state()
+            # The record *fields* have to be checked too, not just that each
+            # record is a dict: {"concepts": {"x": {"correct": "bad"}}} is
+            # shaped correctly and still raises the first time /api/state
+            # converts that value to int, which is a crash rather than the
+            # documented reset.
+            if not all(_record_is_valid(key, record) for record in value.values()):
                 self._backup_locked()
                 return _empty_state()
         last_lesson = data.get("last_lesson_id")
@@ -136,6 +187,14 @@ class ProgressStore:
         with self._lock:
             record = self._lesson_record_locked(lesson_id)
             record["validations"][block_id] = {"passed": passed, "at": _now()}
+            if not passed and record.get("status") == "complete":
+                # Re-running a check that now fails un-completes the lesson.
+                # lesson_completion() already reports the missing gate, but the
+                # roadmap, /api/state and prerequisite unlocking read the
+                # stored status — so leaving it "complete" would keep
+                # certifying work that has since regressed.
+                record["status"] = "in_progress"
+                record["completed_at"] = None
             self._state["last_lesson_id"] = lesson_id
             self._save_locked()
 

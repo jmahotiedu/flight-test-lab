@@ -19,6 +19,21 @@ from learning.checks.source_check import _resolve_repo_path
 from learning.server.validators import CheckResult, ValidatorContext, truncate
 
 
+def _junit_outcome(testcases: list[ET.Element]) -> set[str]:
+    """Outcomes recorded for the matching testcases: passed/failed/error/skipped."""
+    outcomes: set[str] = set()
+    for testcase in testcases:
+        if testcase.find("failure") is not None:
+            outcomes.add("failed")
+        elif testcase.find("error") is not None:
+            outcomes.add("error")
+        elif testcase.find("skipped") is not None:
+            outcomes.add("skipped")
+        else:
+            outcomes.add("passed")
+    return outcomes
+
+
 def _describe(value: Any) -> str:
     rendered = repr(value)
     return rendered if len(rendered) <= 60 else rendered[:57] + "..."
@@ -117,6 +132,26 @@ def run(args: dict[str, Any], context: ValidatorContext) -> CheckResult:
                 f"(columns present: {preview or 'none'})"
             )
 
+    # csv_row_matches is csv_row's pattern-matching twin: each column must
+    # match a regex *in the same row*, so a requirement id in one row cannot
+    # be paired with an evidence path from another.
+    csv_row_matches = args.get("csv_row_matches")
+    if isinstance(csv_row_matches, dict) and text:
+        rows = list(csv.DictReader(StringIO(text)))
+        matched_row = any(
+            all(
+                re.search(str(pattern), str(row.get(column, "") or "").strip())
+                for column, pattern in csv_row_matches.items()
+            )
+            for row in rows
+        )
+        if not matched_row:
+            columns = ", ".join(sorted({key for row in rows for key in row}))
+            failures.append(
+                f"{relative} has no single row where every column matches "
+                f"{csv_row_matches} (columns present: {columns or 'none'})"
+            )
+
     # json_fields checks the *values*, not just that a key name appears
     # somewhere in the text.  Searching for key names lets an empty skeleton
     # pass, which would certify a manifest that cannot reproduce anything.
@@ -139,13 +174,28 @@ def run(args: dict[str, Any], context: ValidatorContext) -> CheckResult:
         except ET.ParseError:
             failures.append(f"{relative} is not parseable XML")
         else:
-            names = {
-                testcase.get("name") for testcase in tree.getroot().iter("testcase")
-            }
-            if not any(junit_testcase in (name or "") for name in names):
+            matches = [
+                testcase
+                for testcase in tree.getroot().iter("testcase")
+                if junit_testcase in (testcase.get("name") or "")
+            ]
+            if not matches:
                 failures.append(
                     f"{relative} has no testcase matching {junit_testcase!r}"
                 )
+            else:
+                # The presence of a name is not a result.  A lesson that
+                # claims a requirement was verified has to require a *passing*
+                # testcase; the controlled-failure lessons ask for "failed"
+                # instead, which is equally explicit.
+                expected = str(args.get("junit_outcome", "passed"))
+                observed = _junit_outcome(matches)
+                if expected != "any" and expected not in observed:
+                    failures.append(
+                        f"{relative}: testcase {junit_testcase!r} is "
+                        f"{'/'.join(sorted(observed))}, expected {expected} — a "
+                        "recorded name is not a recorded result"
+                    )
 
     passed = not failures
     if passed:

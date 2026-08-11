@@ -54,10 +54,24 @@ endif()
 add_executable(dut src/main.cpp)
 target_link_libraries(dut PRIVATE dut_core)
 
+# MinGW links libstdc++/libgcc/winpthread dynamically by default, so the
+# binary resolves those DLLs from PATH at startup — and on a typical Windows
+# box PATH also contains Git's older bundled MinGW. Picking up the wrong
+# libstdc++-6.dll makes the DUT die with STATUS_ENTRYPOINT_NOT_FOUND before
+# main() runs, which looks like a broken build rather than a DLL collision.
+# The harness launches this binary from pytest, the learning server and CI, so
+# it is linked statically and depends on nothing but the OS.
+if(MINGW)
+  target_link_options(dut PRIVATE -static)
+endif()
+
 enable_testing()
 
 add_executable(dut_tests tests/test_protocol.cpp)
 target_link_libraries(dut_tests PRIVATE dut_core)
+if(MINGW)
+  target_link_options(dut_tests PRIVATE -static)
+endif()
 
 # One CTest entry per case, so a failure reports which contract broke rather
 # than just "the test binary exited 1".
