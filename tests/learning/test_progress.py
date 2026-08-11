@@ -523,24 +523,44 @@ def test_progress_file_is_written_atomically(tmp_path: Path) -> None:
     assert data["lessons"]["x"]["status"] == "in_progress"
 
 
-@pytest.mark.parametrize(
-    "payload",
-    [
-        # json.loads refuses both: CPython caps integer-string conversion, and
-        # deep nesting raises RecursionError, which is not a ValueError. Either
-        # escaping means `python -m learning` cannot start at all, so the
-        # documented backup-and-reset never runs.
-        '{"version": 1, "lessons": {}, "x": ' + "1" * 5000 + "}",
-        '{"version": 1, "lessons": {}, "x": ' + "[" * 2000 + "]" * 2000 + "}",
-    ],
-)
-def test_undecodable_progress_files_take_the_reset_path(
-    tmp_path: Path, payload: str
-) -> None:
+def test_an_oversized_integer_takes_the_reset_path(tmp_path: Path) -> None:
+    """A plain ValueError from json.loads, not a JSONDecodeError.
+
+    Escaping here means `python -m learning` cannot start at all, so the
+    documented backup-and-reset never runs.
+    """
     path = tmp_path / "progress.json"
-    path.write_text(payload, encoding="utf-8")
+    path.write_text(
+        '{"version": 1, "lessons": {}, "x": ' + "1" * 5000 + "}", encoding="utf-8"
+    )
 
     store = ProgressStore(path)
+
+    assert store.snapshot()["lessons"] == {}
+    assert path.with_suffix(".corrupt.json").exists()
+
+
+def test_a_recursion_error_takes_the_reset_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Deep nesting raises RecursionError, which is not a ValueError.
+
+    Injected rather than provoked: the depth CPython gives up at is an
+    implementation detail — 2000 levels raise on 3.11 and parse fine on 3.12.
+    """
+    import learning.server.progress as module
+
+    path = tmp_path / "progress.json"
+    path.write_text('{"version": 1, "lessons": {}}', encoding="utf-8")
+
+    def explode(*_args: object, **_kwargs: object) -> object:
+        raise RecursionError("maximum recursion depth exceeded")
+
+    monkeypatch.setattr(module.json, "loads", explode)
+    store = ProgressStore(path)
+    # snapshot() deep-copies through json.loads, so the patch has to come off
+    # before the assertions — otherwise the test breaks the thing it inspects.
+    monkeypatch.undo()
 
     assert store.snapshot()["lessons"] == {}
     assert path.with_suffix(".corrupt.json").exists()

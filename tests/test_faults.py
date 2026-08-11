@@ -409,26 +409,43 @@ def test_process_termination_fault_exits_after_the_configured_requests(
 
 
 @pytest.mark.requirement("REQ-FAULT-001")
-@pytest.mark.parametrize(
-    ("label", "payload"),
-    [
-        # Both are syntactically valid JSON that json.loads refuses to decode:
-        # CPython caps integer-string conversion, and deep nesting raises
-        # RecursionError, which is not a ValueError at all. Each used to end
-        # the run with a traceback instead of the usual one-line diagnostic.
-        ("oversized integer", '{"response_delay_ms": ' + "1" * 5000 + "}"),
-        ("deep nesting", '{"response_delay_ms": ' + "[" * 2000 + "]" * 2000 + "}"),
-    ],
-)
-def test_undecodable_fault_configs_are_cli_errors(
-    tmp_path: Path, label: str, payload: str
-) -> None:
+def test_an_oversized_integer_config_is_a_cli_error(tmp_path: Path) -> None:
+    """CPython caps integer-string conversion and raises a plain ValueError.
+
+    Not a JSONDecodeError, so it used to end the run with a traceback rather
+    than the one-line diagnostic every other malformed config gets.
+    """
     from simulator.simulator import load_fault_config
 
     path = tmp_path / "fault.json"
-    path.write_text(payload, encoding="utf-8")
+    path.write_text('{"response_delay_ms": ' + "1" * 5000 + "}", encoding="utf-8")
     with pytest.raises(SystemExit, match="--fault-config: cannot read"):
         load_fault_config(path)
+
+
+@pytest.mark.requirement("REQ-FAULT-001")
+def test_a_recursion_error_while_decoding_is_a_cli_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Deep nesting makes json.loads raise RecursionError, which is not a
+    ValueError and so was not caught.
+
+    The exception is injected rather than provoked: the depth at which CPython
+    gives up is an implementation detail — 2000 levels raise on 3.11 and parse
+    fine on 3.12 — so provoking it would test the interpreter, not this
+    handler.
+    """
+    import simulator.simulator as module
+
+    path = tmp_path / "fault.json"
+    path.write_text("{}", encoding="utf-8")
+
+    def explode(*_args: object, **_kwargs: object) -> object:
+        raise RecursionError("maximum recursion depth exceeded")
+
+    monkeypatch.setattr(module.json, "loads", explode)
+    with pytest.raises(SystemExit, match="--fault-config: cannot read"):
+        module.load_fault_config(path)
 
 
 @pytest.mark.requirement("REQ-FAULT-001")
