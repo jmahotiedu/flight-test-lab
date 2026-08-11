@@ -610,6 +610,92 @@ def test_unknown_validator_rejected() -> None:
         run_validator("arbitrary_shell", {"command": "echo hi"}, CONTEXT)
 
 
+def test_a_build_gate_checks_each_executable_not_their_directory(
+    tmp_path: Path,
+) -> None:
+    """A directory is not an artifact.
+
+    Naming the folder two executables share passes as soon as any earlier
+    build left something in it — including a stale tree from before the edit
+    that dropped one of them, which is precisely the case worth catching.
+    """
+    (tmp_path / "build" / "bin").mkdir(parents=True)
+    suffix = ".exe" if sys.platform == "win32" else ""
+    (tmp_path / "build" / "bin" / f"dut{suffix}").write_text("x", encoding="utf-8")
+
+    args = {
+        "tool": "cmake",
+        "args": ["--version"],
+        "expect_exit": 0,
+        "executables": ["build/bin/dut", "build/bin/dut_tests"],
+    }
+    context = ValidatorContext(repo_root=tmp_path)
+    try:
+        result = run_validator("toolchain_check", args, context)
+    except Exception:  # noqa: BLE001 - cmake may be absent; the path check is
+        pytest.skip("cmake is not available on this machine")
+    assert not result.passed
+    assert f"build/bin/dut_tests{suffix} does not exist" in result.interpretation
+
+
+def test_expect_stdout_regex_accepts_a_list_that_must_all_match(
+    tmp_path: Path,
+) -> None:
+    """Evidence can span lines that no single regex can bind together.
+
+    pytest truncates a long `assert` introspection line, so "this failed as an
+    assertion" and "about this value" land on different lines.
+    """
+    exercise = tmp_path / "test_two_lines.py"
+    exercise.write_text(
+        "def test_thing():\n    assert 'NOTREADY' == 'READY'\n", encoding="utf-8"
+    )
+    base: dict[str, object] = {
+        "nodeids": [str(exercise)],
+        "expect": "fail",
+        "timeout_seconds": 60,
+    }
+    both = run_validator(
+        "pytest_check",
+        {**base, "expect_stdout_regex": ["AssertionError: assert", "NOTREADY"]},
+        CONTEXT,
+    )
+    assert both.passed, both.interpretation
+
+    missing = run_validator(
+        "pytest_check",
+        {**base, "expect_stdout_regex": ["AssertionError: assert", "ABSENT-MARKER"]},
+        CONTEXT,
+    )
+    assert not missing.passed
+    assert "ABSENT-MARKER" in missing.interpretation
+
+
+def test_a_raised_exception_is_not_an_assertion_diff(tmp_path: Path) -> None:
+    """Day 5's gate must require the introspection it teaches you to read.
+
+    `raise RuntimeError("NOTREADY")` exits nonzero, records the testcase, and
+    prints the word — with none of the diff the lesson is about.
+    """
+    exercise = tmp_path / "test_raiser.py"
+    exercise.write_text(
+        "def test_thing():\n    raise RuntimeError('NOTREADY')\n", encoding="utf-8"
+    )
+    result = run_validator(
+        "pytest_check",
+        {
+            "nodeids": [str(exercise)],
+            "expect": "fail",
+            "expect_stdout_regex": ["AssertionError: assert", "NOTREADY"],
+            "require_assertion_failure": True,
+            "timeout_seconds": 60,
+        },
+        CONTEXT,
+    )
+    assert not result.passed
+    assert "AssertionError: assert" in result.interpretation
+
+
 @pytest.mark.parametrize("validator", ["artifact_check", "source_check"])
 def test_an_unreadable_artifact_is_a_failed_check_not_a_crash(
     validator: str, tmp_path: Path

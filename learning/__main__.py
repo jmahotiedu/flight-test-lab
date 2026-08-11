@@ -17,6 +17,7 @@ from pathlib import Path
 from learning.checks.common import terminate_active_validators
 from learning.server.app import build_server
 from learning.server.curriculum import CurriculumError
+from learning.server.instance_lock import AlreadyRunning, single_instance
 
 
 def main() -> int:
@@ -41,8 +42,26 @@ def main() -> int:
         raise SystemExit("--port must be 0 (auto) or between 1 and 65535")
 
     repo_root = Path(__file__).resolve().parent.parent
+    learning_root = Path(__file__).resolve().parent
+    progress_path = learning_root / ".progress.json"
+
+    # Taken before anything reads the progress file. Two servers each hold
+    # their own copy of it and write the whole thing back, so the second one
+    # to save silently discards the first learner's answers — and both UIs go
+    # on showing the state their own process remembers.
     try:
-        server = build_server(args.port, repo_root=repo_root)
+        with single_instance(progress_path):
+            return _serve(args, repo_root, progress_path)
+    except AlreadyRunning as exc:
+        print(f"Not starting: {exc}")
+        return 3
+
+
+def _serve(args: argparse.Namespace, repo_root: Path, progress_path: Path) -> int:
+    try:
+        server = build_server(
+            args.port, repo_root=repo_root, progress_path=progress_path
+        )
     except CurriculumError as exc:
         print(f"Curriculum failed validation:\n{exc}")
         return 2

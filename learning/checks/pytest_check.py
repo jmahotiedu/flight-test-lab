@@ -68,7 +68,22 @@ def run(args: dict[str, Any], context: ValidatorContext) -> CheckResult:
     junit_contains = args.get("junit_contains", [])
     if not isinstance(junit_contains, list):
         raise ValueError("pytest_check 'junit_contains' must be a list")
-    stdout_pattern = args.get("expect_stdout_regex")
+    # A list means "every one of these must appear". Some evidence spans
+    # several lines of pytest output — an assertion's introspection is on one
+    # line and the value that differs on another, and pytest truncates the
+    # first when the compared objects are large — so one regex cannot always
+    # express "this failed as an assertion, about this value".
+    stdout_patterns = args.get("expect_stdout_regex")
+    if isinstance(stdout_patterns, str):
+        stdout_patterns = [stdout_patterns]
+    elif stdout_patterns is None:
+        stdout_patterns = []
+    elif not isinstance(stdout_patterns, list) or not all(
+        isinstance(item, str) for item in stdout_patterns
+    ):
+        raise ValueError(
+            "pytest_check 'expect_stdout_regex' must be a string or list of strings"
+        )
     require_failure_not_error = bool(args.get("require_assertion_failure", False))
     timeout = clamp_timeout(args)
     extra_pytest_args = args.get("pytest_args", [])
@@ -140,8 +155,9 @@ def run(args: dict[str, Any], context: ValidatorContext) -> CheckResult:
                     "during collection or setup, which proves nothing about "
                     "the behaviour under test"
                 )
-        if isinstance(stdout_pattern, str) and not re.search(stdout_pattern, stdout):
-            failures.append(f"pytest output did not match /{stdout_pattern}/")
+        for pattern in stdout_patterns:
+            if not re.search(pattern, stdout):
+                failures.append(f"pytest output did not match /{pattern}/")
 
     passed = not failures
     if passed:

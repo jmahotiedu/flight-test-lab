@@ -56,14 +56,14 @@
           "id": "verify-build",
           "validator": "toolchain_check",
           "mandatory": true,
-          "description": "Builds cpp/ with CMake and requires both the executable and the test binary to exist afterwards.",
+          "description": "Builds cpp/ with CMake and requires both the executable and the test binary to exist afterwards. Each executable is checked by path — a build that drops or renames one of them still exits 0 and still leaves the bin directory behind.",
           "args": {
             "tool": "cmake",
             "args": ["--build", "cpp/build"],
             "expect_exit": 0,
-            "artifact": "cpp/build/bin",
+            "executables": ["cpp/build/bin/dut", "cpp/build/bin/dut_tests"],
             "timeout_seconds": 120,
-            "success_note": "The C++ DUT compiled and linked. cpp/build/bin now holds a native executable built from the sources you just read."
+            "success_note": "The C++ DUT compiled and linked. Both executables are on disk: dut (the server the parity tests drive) and dut_tests (the unit tests CTest runs). Checking the directory they share would have passed on a stale tree that produced neither."
           }
         },
         {

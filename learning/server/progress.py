@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 import shutil
 import threading
 from datetime import UTC, datetime
@@ -154,7 +155,12 @@ class ProgressStore:
         return data
 
     def _save_locked(self) -> None:
-        temp = self._path.with_suffix(".tmp")
+        # The temp name carries the pid: a fixed ".tmp" is shared by every
+        # process pointed at this file, so two writers can interleave badly
+        # enough that one replace() finds the file already consumed by the
+        # other. single_instance() makes that unlikely; this makes it
+        # impossible, and costs one string.
+        temp = self._path.with_suffix(f".{os.getpid()}.tmp")
         temp.write_text(
             json.dumps(self._state, indent=2, sort_keys=True), encoding="utf-8"
         )

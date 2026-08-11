@@ -30,10 +30,10 @@
     },
     {
       "id": "iq-terminate-kill",
-      "question": "What is the difference between terminate() and kill() on a subprocess, and why try them in that order?",
+      "question": "What is the difference between terminate() and kill() on a subprocess, why try them in that order — and what changes on Windows?",
       "concepts": ["process-management"],
-      "keywords": ["SIGTERM", "SIGKILL", "cleanup"],
-      "sample_answer": "terminate() sends SIGTERM — the process can run signal handlers, flush logs, and exit cleanly. kill() sends SIGKILL — immediate, no cleanup. You terminate first for graceful shutdown evidence, then kill only as a backstop, then wait() to reap."
+      "keywords": ["SIGTERM", "SIGKILL", "TerminateProcess", "Windows", "cleanup"],
+      "sample_answer": "On POSIX, terminate() sends SIGTERM — the process can run signal handlers, flush logs and exit cleanly — and kill() sends SIGKILL, which is immediate and uncatchable. You terminate first for graceful shutdown evidence, then kill only as a backstop, then wait() to reap. On Windows there are no signals: both call TerminateProcess, so there is genuinely no difference in effect. The ladder is still worth writing — the same harness has to shut a DUT down cleanly on Linux — but on Windows it is portable habit, not platform behaviour, and expecting a graceful shutdown there will disappoint you."
     },
     {
       "id": "iq-fixture",

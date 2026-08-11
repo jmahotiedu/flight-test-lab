@@ -107,6 +107,25 @@ def test_only_one_dut_fixture_is_built_for_those_files() -> None:
     assert len(builds) == 1, f"expected one session DUT, saw {len(builds)}: {builds}"
 
 
+def test_no_interview_answer_teaches_posix_as_universal() -> None:
+    """Graded answers must be true on the platform the learner is using.
+
+    terminate() and kill() both call TerminateProcess on Windows — Day 6 says
+    so in its own deeper note — so an answer of "there is no difference here"
+    is correct, and was being marked wrong while the revealed answer taught
+    the SIGTERM/SIGKILL distinction as if it were universal.
+    """
+    curriculum = load_curriculum(LEARNING_ROOT, validator_names())
+    question = next(q for q in curriculum.interview if q.id == "iq-terminate-kill")
+
+    windows_answer = "on Windows there is no difference: both call TerminateProcess"
+    assert any(
+        keyword.lower() in windows_answer.lower() for keyword in question.keywords
+    )
+    assert "TerminateProcess" in question.sample_answer
+    assert "SIGTERM" in question.sample_answer, "the POSIX half is still taught"
+
+
 def test_no_gate_before_day_11_can_demand_a_ported_command() -> None:
     """Day 2 adds `ping` to the Python DUT; Day 11 ports it to the C++ one.
 

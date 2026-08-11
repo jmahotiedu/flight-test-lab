@@ -41,12 +41,16 @@
           "id": "verify",
           "mandatory": true,
           "validator": "pytest_check",
-          "description": "Runs your deliberately broken copy. This check PASSES only when the test FAILS — the failure, and its introspection diff, are the intended artifact.",
+          "description": "Runs your deliberately broken copy. This check PASSES only when the test FAILS — the failure, and its introspection diff, are the intended artifact. It requires pytest's rewritten-assertion output specifically: `raise RuntimeError(\"NOTREADY\")` also exits nonzero and also prints the word, and produces none of the diff this lesson is about reading.",
           "args": {
             "nodeids": ["evidence/exercises/test_status_broken.py"],
             "expect": "fail",
             "junit_contains": ["test_status_request_returns_ready"],
-            "expect_stdout_regex": "NOTREADY",
+            "expect_stdout_regex": [
+              "AssertionError: assert",
+              "NOTREADY"
+            ],
+            "require_assertion_failure": true,
             "success_note": "The broken assertion failed exactly as designed, and the report contains the NOTREADY diff — you produced and read a real failure signature."
           }
         },

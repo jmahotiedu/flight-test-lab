@@ -13,6 +13,7 @@ suite stays green on a machine without a C++ toolchain.
 from __future__ import annotations
 
 import json
+import re
 import socket
 import subprocess
 import sys
@@ -287,6 +288,139 @@ def test_course_added_commands_do_not_diverge(
     )
 
 
+def _counter_branch(source: str) -> str | None:
+    """The body of the `"counter"` branch, by brace matching.
+
+    A fixed-size window after the string literal was wrong in a way that only
+    shows up on a *correct* implementation: `std::atomic<int> g_counter` is
+    declared at namespace scope, above the branch, so the window contained the
+    increment and none of the synchronisation.
+    """
+    marker = source.find('"counter"')
+    if marker < 0:
+        return None
+    opening = source.find("{", marker)
+    if opening < 0:
+        return None
+    depth = 0
+    for index in range(opening, len(source)):
+        if source[index] == "{":
+            depth += 1
+        elif source[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return source[opening : index + 1]
+    return source[opening:]
+
+
+# Names on the left of ++/--/+=/-=/=, or the receiver of .fetch_add/.fetch_sub.
+_MUTATED = re.compile(
+    r"(?:\+\+|--)\s*([A-Za-z_]\w*)"
+    r"|([A-Za-z_]\w*)\s*(?:\+\+|--|\+=|-=|=(?!=))"
+    r"|([A-Za-z_]\w*)\s*\.\s*(?:fetch_add|fetch_sub|exchange|store)"
+)
+
+
+def _synchronisation_in(branch: str, source: str) -> tuple[bool, str]:
+    """Is the counter's read-modify-write actually synchronised?
+
+    Two accepted shapes, which is what the lesson teaches: a lock held across
+    the branch, or a counter whose *declaration* is atomic — wherever in the
+    file that declaration happens to live.
+    """
+    for token in ("lock_guard", "scoped_lock", "unique_lock", "std::mutex"):
+        if token in branch:
+            return True, f"holds a lock ({token})"
+
+    mutated = {name for match in _MUTATED.findall(branch) for name in match if name}
+    for name in sorted(mutated):
+        atomic = re.compile(
+            rf"(?:std::)?atomic(?:_\w+)?\s*(?:<[^>]*>)?\s*{re.escape(name)}\b"
+        )
+        if atomic.search(source):
+            return True, f"{name} is declared atomic"
+    if not mutated:
+        return False, "nothing in the branch looks like an increment"
+    return False, (
+        "no lock, and none of " + ", ".join(sorted(mutated)) + " is declared atomic"
+    )
+
+
+# The shapes a learner can legitimately write, and the ones that are the race.
+# These need no C++ toolchain: the point is that the gate finds a declaration
+# wherever it lives, rather than whatever happens to sit near the branch.
+_COUNTER_SOURCE = """#include "dut/protocol.hpp"
+{declaration}
+namespace dut {{
+Value build_response(const Value& request) {{
+  if (command->as_string() == "counter") {{
+{body}
+  }}
+  return Object{{{{"status", Value("error")}}}};
+}}
+}}
+"""
+
+_ATOMIC = """
+#include <atomic>
+namespace {
+std::atomic<int> g_counter{0};
+}
+"""
+
+_PLAIN = """
+namespace {
+int g_counter = 0;
+}
+"""
+
+_MUTEX = """
+#include <mutex>
+namespace {
+int g_counter = 0;
+std::mutex g_m;
+}
+"""
+
+_ATOMIC_BYSTANDER = """
+#include <atomic>
+namespace {
+std::atomic<int> g_other{0};
+int g_counter = 0;
+}
+"""
+
+_LOCKED_BODY = """    std::lock_guard<std::mutex> guard(g_m);
+    g_counter = g_counter + 1;"""
+
+_INCREMENT = '    return Object{{"count", Value(++g_counter)}};'
+
+
+@pytest.mark.parametrize(
+    ("label", "declaration", "body", "synchronised"),
+    [
+        # The lesson's own hint: an atomic at namespace scope, incremented in
+        # the branch. A fixed-size window after the string literal saw the
+        # increment and none of the declaration, so it rejected a correct
+        # implementation — and that gate is mandatory for finishing Day 11.
+        ("namespace atomic", _ATOMIC, _INCREMENT, True),
+        ("fetch_add", _ATOMIC, "    const int n = g_counter.fetch_add(1) + 1;", True),
+        ("lock held in the branch", _MUTEX, _LOCKED_BODY, True),
+        ("plain read-modify-write", _PLAIN, "    g_counter = g_counter + 1;", False),
+        ("plain increment", _PLAIN, _INCREMENT, False),
+        ("an atomic that is not the counter", _ATOMIC_BYSTANDER, _INCREMENT, False),
+    ],
+)
+def test_counter_synchronisation_is_recognised_not_pattern_matched(
+    label: str, declaration: str, body: str, synchronised: bool
+) -> None:
+    source = _COUNTER_SOURCE.format(declaration=declaration, body=body)
+    branch = _counter_branch(source)
+    assert branch is not None
+    held, reason = _synchronisation_in(branch, source)
+    assert held is synchronised, f"{label}: {reason}"
+
+
 @pytest.mark.requirement("REQ-CPP-001")
 def test_ported_counter_is_safe_under_concurrency(cpp_dut: int) -> None:
     """If counter was ported, it must survive concurrent clients.
@@ -311,15 +445,17 @@ def test_ported_counter_is_safe_under_concurrency(cpp_dut: int) -> None:
     source = (REPO_ROOT / "cpp" / "src" / "protocol.cpp").read_text(
         encoding="utf-8", errors="replace"
     )
-    counter_region = source[source.find('"counter"') :][:1200]
-    assert any(
-        token in counter_region
-        for token in ("std::mutex", "lock_guard", "scoped_lock", "std::atomic")
-    ), (
-        "the C++ counter branch shows no synchronisation (no mutex, lock_guard "
-        "or atomic). The server is thread-per-connection, so an unguarded "
-        "read-modify-write is the race Day 9 taught you to find — this time in "
-        "a language with no GIL to hide it."
+    branch = _counter_branch(source)
+    assert branch is not None, (
+        'no `"counter"` branch found in cpp/src/protocol.cpp — the concurrency '
+        "check cannot read an implementation it cannot locate"
+    )
+    held, reason = _synchronisation_in(branch, source)
+    assert held, (
+        f"the C++ counter branch shows no synchronisation ({reason}). The "
+        "server is thread-per-connection, so an unguarded read-modify-write is "
+        "the race Day 9 taught you to find — this time in a language with no "
+        "GIL to hide it."
     )
 
     # 2. Behavioural, best effort: with real contention, a lost update shows up

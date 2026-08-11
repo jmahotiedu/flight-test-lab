@@ -111,15 +111,32 @@ def _evaluate(
     if isinstance(forbidden, str) and re.search(forbidden, combined, re.MULTILINE):
         problems.append(f"output matched /{forbidden}/, which must not appear")
 
-    artifact = args.get("artifact")
-    if isinstance(artifact, str):
+    def check_artifact(entry: str, *, executable: bool) -> None:
         # Repository-relative only: an absolute or escaping path is a bug in
         # the lesson definition, not something to silently resolve.
-        target = (context.repo_root / artifact).resolve()
+        relative = entry + ".exe" if executable and sys.platform == "win32" else entry
+        target = (context.repo_root / relative).resolve()
         if not target.is_relative_to(context.repo_root.resolve()):
-            problems.append(f"artifact path {artifact!r} escapes the repository")
+            problems.append(f"artifact path {entry!r} escapes the repository")
         elif not target.exists():
-            problems.append(f"expected artifact {artifact} does not exist")
+            problems.append(f"expected artifact {relative} does not exist")
+        elif executable and not target.is_file():
+            problems.append(f"{relative} exists but is not a file")
+
+    artifact = args.get("artifact")
+    for entry in [artifact] if isinstance(artifact, str) else artifact or []:
+        if isinstance(entry, str):
+            check_artifact(entry, executable=False)
+
+    # A build that produces two executables has to be checked for two
+    # executables. Naming the directory they share passes the moment *any*
+    # earlier build left something in it — including a stale tree from before
+    # the edit that dropped one of them. Paths are written without a suffix;
+    # ".exe" is appended on Windows so one lesson covers both platforms.
+    executables = args.get("executables")
+    for entry in [executables] if isinstance(executables, str) else executables or []:
+        if isinstance(entry, str):
+            check_artifact(entry, executable=True)
 
     passed = not problems
     if passed:
