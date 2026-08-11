@@ -23,19 +23,30 @@ from learning.server.validators import (
 )
 
 
-def _junit_test_names(junit_path: Path) -> set[str]:
+def _junit_test_names(junit_path: Path) -> tuple[set[str], set[str]]:
+    """Return (all testcase names, names that were skipped).
+
+    Skips matter: a run where every test skipped still exits 0, and the
+    testcases still appear in the report. Treating that as a pass would let a
+    lesson certify work that never executed — for instance the C++ parity
+    tests on a machine where cpp/build was never built.
+    """
     if not junit_path.exists():
-        return set()
+        return set(), set()
     try:
         tree = ET.parse(junit_path)
     except ET.ParseError:
-        return set()
+        return set(), set()
     names: set[str] = set()
+    skipped: set[str] = set()
     for testcase in tree.getroot().iter("testcase"):
         name = testcase.get("name")
-        if name:
-            names.add(name)
-    return names
+        if not name:
+            continue
+        names.add(name)
+        if testcase.find("skipped") is not None:
+            skipped.add(name)
+    return names, skipped
 
 
 def run(args: dict[str, Any], context: ValidatorContext) -> CheckResult:
@@ -96,14 +107,20 @@ def run(args: dict[str, Any], context: ValidatorContext) -> CheckResult:
         elif expect == "fail" and exit_status == 0:
             failures.append("expected at least one test failure, but pytest exited 0")
 
-        test_names = _junit_test_names(junit_path)
+        test_names, skipped_names = _junit_test_names(junit_path)
         for expected_name in junit_contains:
             if not isinstance(expected_name, str):
                 continue
-            if not any(expected_name in name for name in test_names):
+            matching = [name for name in test_names if expected_name in name]
+            if not matching:
                 failures.append(
                     f"JUnit report does not contain a testcase matching "
                     f"{expected_name!r} (found: {sorted(test_names) or 'none'})"
+                )
+            elif all(name in skipped_names for name in matching):
+                failures.append(
+                    f"every test matching {expected_name!r} was skipped, so "
+                    "nothing was actually verified"
                 )
         if isinstance(stdout_pattern, str) and not re.search(stdout_pattern, stdout):
             failures.append(f"pytest output did not match /{stdout_pattern}/")
@@ -132,5 +149,8 @@ def run(args: dict[str, Any], context: ValidatorContext) -> CheckResult:
         duration_ms=duration_ms,
         interpretation=interpretation,
         timed_out=timed_out,
-        details={"junit_testcases": sorted(test_names)},
+        details={
+            "junit_testcases": sorted(test_names),
+            "skipped": sorted(skipped_names),
+        },
     )

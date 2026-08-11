@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -128,6 +129,57 @@ def test_interview_questions_cover_core_concepts(curriculum: Curriculum) -> None
     covered = {concept for q in curriculum.interview for concept in q.concepts}
     for required in ("python-runtime", "timing", "process-management", "pytest"):
         assert required in covered
+
+
+@pytest.mark.parametrize(
+    ("prerequisites", "expected"),
+    [
+        (["l2"], "comes later in the program"),
+        (["l1"], "lists itself as a prerequisite"),
+        (["nope"], "unknown prerequisite"),
+    ],
+)
+def test_unreachable_prerequisites_fail_at_load(
+    tmp_path: Path, prerequisites: list[str], expected: str
+) -> None:
+    """The loader, not just the test suite, must reject a dead-end chain.
+
+    A forward or self-referencing prerequisite leaves the lesson locked
+    forever; someone launching the server without running pytest deserves the
+    same loud failure.
+    """
+    root = tmp_path / "learning"
+    (root / "curriculum" / "modules").mkdir(parents=True)
+    (root / "curriculum" / "curriculum.json").write_text(
+        '{"concepts": ["pytest"], "days":'
+        ' [{"day": 1, "title": "t", "module": "day01.json"}]}',
+        encoding="utf-8",
+    )
+    lessons = [
+        {
+            "id": "l1",
+            "title": "one",
+            "objective": "o",
+            "estimated_minutes": 5,
+            "prerequisites": prerequisites,
+            "blocks": [{"type": "learn", "id": "b", "text": "x"}],
+        },
+        {
+            "id": "l2",
+            "title": "two",
+            "objective": "o",
+            "estimated_minutes": 5,
+            "blocks": [{"type": "learn", "id": "b", "text": "x"}],
+        },
+    ]
+    (root / "curriculum" / "modules" / "day01.json").write_text(
+        json.dumps({"lessons": lessons}), encoding="utf-8"
+    )
+    (root / "curriculum" / "interview.json").write_text(
+        '{"questions": []}', encoding="utf-8"
+    )
+    with pytest.raises(CurriculumError, match=expected):
+        load_curriculum(root, validator_names())
 
 
 def test_malformed_curriculum_fails_loudly(tmp_path: Path) -> None:

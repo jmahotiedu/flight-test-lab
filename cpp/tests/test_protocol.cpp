@@ -98,9 +98,39 @@ void test_json_round_trip() {
       dut::parse(R"({"text": "line\nbreak \"quoted\" é"})");
   check_true(escapes.has_value(), "escape sequences parse");
   if (escapes) {
-    check_equal(escapes->dump(), "{\"text\": \"line\\nbreak \\\"quoted\\\" \xc3\xa9\"}",
-                "escapes survive a round trip");
+    // ensure_ascii=True, as Python's json.dumps defaults to: é is emitted as
+    // the six characters \u00e9 rather than as raw UTF-8 bytes.
+    check_equal(escapes->dump(),
+                "{\"text\": \"line\\nbreak \\\"quoted\\\" \\u00e9\"}",
+                "escapes survive a round trip and non-ASCII is escaped");
   }
+
+  // Astral characters become a UTF-16 surrogate pair, exactly as Python does.
+  const std::optional<dut::Value> astral = dut::parse(R"({"text": "😀"})");
+  check_true(astral.has_value(), "surrogate pair parses");
+  if (astral) {
+    check_equal(astral->dump(), "{\"text\": \"\\ud83d\\ude00\"}",
+                "astral characters round trip as surrogate pairs");
+  }
+}
+
+// REQ-PROTO-002: JSON forbids raw control characters inside strings.
+void test_control_characters_rejected() {
+  const std::string with_tab = "{\"command\": \"status\", \"sequence\": \"a\tb\"}";
+  check_equal(respond(with_tab),
+              R"({"error_code": "INVALID_JSON", "status": "error"})",
+              "a literal tab inside a string is rejected");
+
+  const std::string with_ctrl = "{\"command\": \"status\", \"sequence\": \"a\x01"
+                                "b\"}";
+  check_equal(respond(with_ctrl),
+              R"({"error_code": "INVALID_JSON", "status": "error"})",
+              "a literal control character inside a string is rejected");
+
+  // The escaped forms remain valid and round trip.
+  check_equal(respond(R"({"command": "status", "sequence": "a\tb"})"),
+              R"({"sequence": "a\tb", "state": "READY", "status": "ok"})",
+              "an escaped tab is accepted and re-escaped on output");
 }
 
 struct TestCase {
@@ -116,6 +146,7 @@ const std::vector<TestCase>& all_tests() {
       {"invalid_json", test_invalid_json},
       {"non_object_request", test_non_object_request},
       {"json_round_trip", test_json_round_trip},
+      {"control_characters", test_control_characters_rejected},
   };
   return tests;
 }

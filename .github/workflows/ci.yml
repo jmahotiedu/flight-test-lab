@@ -65,11 +65,14 @@ jobs:
             --cov-report=xml:evidence/coverage.xml
 
       # The protocol suite must hold against the native DUT as well, not just
-      # the Python one — that is what REQ-CPP-001 claims.
+      # the Python one — that is what REQ-CPP-001 claims. The parity suite gets
+      # its own report because the traceability map names it as the evidence.
       - name: Run the protocol suite against the C++ DUT
         run: |
           pytest -v --dut cpp tests/test_status.py tests/test_protocol.py \
             --junitxml=evidence/junit/test-results-cpp.xml
+          pytest -v tests/test_cpp_dut.py \
+            --junitxml=evidence/junit/test-results-parity.xml
 
       - name: Upload evidence
         if: always()

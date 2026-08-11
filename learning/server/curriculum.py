@@ -320,12 +320,29 @@ def load_curriculum(
             )
         )
 
+    # Prerequisites must resolve *and* point backwards.  A forward or circular
+    # dependency leaves that lesson permanently locked in the roadmap and
+    # skipped by resume, which is a curriculum defect the learner would
+    # experience as a dead end.  Checking it here means the server refuses to
+    # start, rather than relying on someone having run the test suite.
+    position = {lesson_id: index for index, lesson_id in enumerate(ordered)}
     for lesson in lessons.values():
         for prerequisite in lesson.prerequisites:
             if prerequisite not in lessons:
                 _fail(
                     program_path,
                     f"lesson {lesson.id!r} has unknown prerequisite {prerequisite!r}",
+                )
+            if prerequisite == lesson.id:
+                _fail(
+                    program_path,
+                    f"lesson {lesson.id!r} lists itself as a prerequisite",
+                )
+            if position[prerequisite] > position[lesson.id]:
+                _fail(
+                    program_path,
+                    f"lesson {lesson.id!r} depends on {prerequisite!r}, which "
+                    "comes later in the program — it could never be unlocked",
                 )
 
     interview_path = curriculum_dir / "interview.json"

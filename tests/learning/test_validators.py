@@ -95,6 +95,35 @@ def test_validator_timeout_kills_the_whole_process_tree() -> None:
     pytest.fail(f"grandchild still holds port {port} after the timeout: {last_error}")
 
 
+def test_skipped_tests_do_not_count_as_verified(tmp_path: Path) -> None:
+    """A run where the expected test skipped must not pass the lesson check.
+
+    pytest exits 0 when everything skips, and the skipped cases still appear
+    in the JUnit report — so a naive check would certify work that never ran
+    (the C++ parity tests on a machine with no cpp/build, for instance).
+    """
+    exercise = tmp_path / "test_skipper.py"
+    exercise.write_text(
+        "import pytest\n\n\n"
+        "def test_needs_hardware():\n"
+        "    pytest.skip('no hardware here')\n",
+        encoding="utf-8",
+    )
+    result = run_validator(
+        "pytest_check",
+        {
+            "nodeids": [str(exercise)],
+            "expect": "pass",
+            "junit_contains": ["test_needs_hardware"],
+            "timeout_seconds": 60,
+        },
+        CONTEXT,
+    )
+    assert result.exit_status == 0, "pytest exits 0 when everything skips"
+    assert not result.passed
+    assert "skipped" in result.interpretation
+
+
 def test_pytest_check_pass_and_junit_evidence() -> None:
     result = run_validator(
         "pytest_check",

@@ -68,6 +68,7 @@ set(DUT_TEST_CASES
   invalid_json
   non_object_request
   json_round_trip
+  control_characters
 )
 foreach(case ${DUT_TEST_CASES})
   add_test(NAME protocol.${case} COMMAND dut_tests ${case})

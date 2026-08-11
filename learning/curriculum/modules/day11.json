@@ -39,6 +39,20 @@
         },
         {
           "type": "verify",
+          "id": "verify-configure",
+          "validator": "toolchain_check",
+          "mandatory": true,
+          "description": "Configures cpp/build against the compiler detected on this machine — the same toolchain that unlocked these lessons, and the one Day 12's debugger needs.",
+          "args": {
+            "tool": "cmake-configure",
+            "expect_exit": 0,
+            "artifact": "cpp/build/CMakeCache.txt",
+            "timeout_seconds": 180,
+            "success_note": "cpp/build is configured. CMake wrote build files there for the detected compiler; nothing has been compiled yet."
+          }
+        },
+        {
+          "type": "verify",
           "id": "verify-build",
           "validator": "toolchain_check",
           "mandatory": true,
@@ -128,8 +142,22 @@
         {
           "type": "do",
           "id": "do",
-          "instructions": "Run the full native cycle, then break it on purpose:\n\n```cmake -S cpp -B cpp/build\ncmake --build cpp/build\nctest --test-dir cpp/build -C Debug --output-on-failure\n```\n\nAll seven tests should pass. If you drop the `-C Debug` and CMake chose a multi-config generator (Visual Studio), every test reports `Not Run — Test not available without configuration`; that is the generator difference in the expandable note, not a broken build.\n\nNow look at what the build produced — `cpp/build/bin/` holds `dut` and `dut_tests`; `cpp/build/CMakeCache.txt` records the compiler and generator CMake chose. Find the `CMAKE_GENERATOR` line and see which one you got.\n\nNext, cause a real compile error and read it. In `cpp/src/protocol.cpp`, delete the semicolon at the end of any statement inside `build_response`, rebuild, and read the message: file, line, column, and what the compiler expected. Then put it back and rebuild to green.\n\nFinally run one CTest case by name and watch it fail-fast:\n\n```ctest --test-dir cpp/build -C Debug -R protocol.invalid_json --output-on-failure\n```",
+          "instructions": "Run the full native cycle, then break it on purpose:\n\n```cmake -S cpp -B cpp/build\ncmake --build cpp/build\nctest --test-dir cpp/build -C Debug --output-on-failure\n```\n\n**On Windows with Visual Studio installed**, name the toolchain explicitly instead — a bare configure picks the MSVC default, and Day 12's debugger cannot read the symbols it produces:\n\n```cmake -S cpp -B cpp/build -G Ninja -DCMAKE_CXX_COMPILER=g++\n```\n\n(If `cpp/build` already exists with the other generator, delete it first: everything in there is generated.)\n\nAll eight tests should pass. If you drop the `-C Debug` and CMake chose a multi-config generator (Visual Studio), every test reports `Not Run — Test not available without configuration`; that is the generator difference in the expandable note, not a broken build.\n\nNow look at what the build produced — `cpp/build/bin/` holds `dut` and `dut_tests`; `cpp/build/CMakeCache.txt` records the compiler and generator CMake chose. Find the `CMAKE_GENERATOR` line and see which one you got.\n\nNext, cause a real compile error and read it. In `cpp/src/protocol.cpp`, delete the semicolon at the end of any statement inside `build_response`, rebuild, and read the message: file, line, column, and what the compiler expected. Then put it back and rebuild to green.\n\nFinally run one CTest case by name and watch it fail-fast:\n\n```ctest --test-dir cpp/build -C Debug -R protocol.invalid_json --output-on-failure\n```",
           "command": "ctest --test-dir cpp/build -C Debug --output-on-failure"
+        },
+        {
+          "type": "verify",
+          "id": "verify-configure",
+          "validator": "toolchain_check",
+          "mandatory": true,
+          "description": "Configures cpp/build with the compiler this machine was detected to have, so the DUT is built by the same toolchain that unlocked these lessons (and that Day 12's debugger can read).",
+          "args": {
+            "tool": "cmake-configure",
+            "expect_exit": 0,
+            "artifact": "cpp/build/CMakeCache.txt",
+            "timeout_seconds": 180,
+            "success_note": "cpp/build is configured against the detected compiler. On Windows this pins Ninja + g++ rather than accepting CMake's Visual Studio default, whose PDB symbols GDB cannot read on Day 12."
+          }
         },
         {
           "type": "verify",

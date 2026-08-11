@@ -80,6 +80,24 @@ PARITY_REQUESTS = (
 # untouched checkout both DUTs reject them identically.
 COURSE_ADDED_COMMANDS = ("ping", "counter")
 
+# Payloads that are not valid UTF-8, or that exercise string rules a text-level
+# test cannot express.  Python decodes each line with errors="replace" before
+# parsing, so the native DUT has to do the same to stay byte-identical.
+PARITY_BYTE_REQUESTS = (
+    pytest.param(b'{"command":"status","sequence":"\xff"}', id="invalid-utf8-byte"),
+    pytest.param(b'{"command":"status","sequence":"\xc3"}', id="truncated-sequence"),
+    pytest.param(b'{"command":"status","sequence":"\xc0\xaf"}', id="overlong"),
+    pytest.param(b'{"command":"status","sequence":"\xed\xa0\x80"}', id="raw-surrogate"),
+    pytest.param(b'{"command":"status","sequence":"\xf4\x90\x80\x80"}', id="above-max"),
+    pytest.param(b'{"command":"status","sequence":"\\ud800"}', id="lone-surrogate"),
+    pytest.param(b'{"command":"status","sequence":"\\ud83d\\ude00"}', id="pair"),
+    pytest.param(b'{"command":"status","sequence":"a\tb"}', id="raw-tab-in-string"),
+    pytest.param(b'{"command":"status","sequence":"a\x01b"}', id="raw-control-char"),
+    pytest.param(b'{"command":"status","sequence":"a\\tb"}', id="escaped-tab"),
+    pytest.param(b'{"command":"status","sequence":"a\x7fb"}', id="del-char"),
+    pytest.param('{"command":"status","sequence":"é😀"}'.encode(), id="non-ascii"),
+)
+
 
 def _wait_ready(host: str, port: int, deadline_seconds: float = 10.0) -> None:
     client = LabClient(host, port)
@@ -175,6 +193,28 @@ def test_cpp_dut_is_byte_identical_to_python(
 ) -> None:
     """Both implementations must answer identically, byte for byte."""
     assert _ask_raw(cpp_dut, request_line) == _ask_raw(python_dut, request_line)
+
+
+def _ask_bytes(port: int, payload: bytes, timeout: float = 5.0) -> bytes:
+    """Send raw bytes and return the raw reply line, undecoded."""
+    with socket.create_connection(("127.0.0.1", port), timeout=timeout) as sock:
+        sock.settimeout(timeout)
+        sock.sendall(payload + b"\n")
+        return sock.makefile("rb").readline().rstrip(b"\n")
+
+
+@pytest.mark.requirement("REQ-CPP-001")
+@pytest.mark.parametrize("payload", PARITY_BYTE_REQUESTS)
+def test_cpp_dut_matches_python_on_raw_bytes(
+    payload: bytes, cpp_dut: int, python_dut: int
+) -> None:
+    """Malformed UTF-8 and string edge cases must agree at the byte level.
+
+    Comparing decoded objects would hide the two things that actually differ
+    between implementations here: how many U+FFFD replacements a bad sequence
+    produces, and whether non-ASCII is escaped on the way out.
+    """
+    assert _ask_bytes(cpp_dut, payload) == _ask_bytes(python_dut, payload)
 
 
 @pytest.mark.requirement("REQ-CPP-001")

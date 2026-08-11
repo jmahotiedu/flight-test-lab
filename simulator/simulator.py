@@ -62,16 +62,36 @@ def load_fault_config(path: Path) -> FaultConfig:
     unknown = set(data) - _FAULT_CONFIG_KEYS
     if unknown:
         raise SystemExit(f"--fault-config: unknown keys: {sorted(unknown)}")
+
+    def _bool(key: str) -> bool:
+        # bool("false") is True, so coercing here would silently *enable* the
+        # fault an operator wrote the config to disable — and the run would
+        # look like a product failure. Require a real JSON boolean.
+        value = data.get(key, False)
+        if not isinstance(value, bool):
+            raise SystemExit(
+                f"--fault-config: {key} must be true or false, got {value!r}"
+            )
+        return value
+
+    def _int(key: str, *, allow_none: bool = False) -> int | None:
+        value = data.get(key)
+        if value is None:
+            return None if allow_none else 0
+        # bool is a subclass of int; {"response_delay_ms": true} is a mistake,
+        # not a 1 ms delay.
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise SystemExit(f"--fault-config: {key} must be an integer, got {value!r}")
+        if value < 0:
+            raise SystemExit(f"--fault-config: {key} must not be negative")
+        return value
+
     return FaultConfig(
-        response_delay_ms=int(data.get("response_delay_ms") or 0),
-        drop_connection=bool(data.get("drop_connection", False)),
-        malformed_response=bool(data.get("malformed_response", False)),
-        startup_delay_ms=int(data.get("startup_delay_ms") or 0),
-        exit_after_requests=(
-            int(data["exit_after_requests"])
-            if data.get("exit_after_requests") is not None
-            else None
-        ),
+        response_delay_ms=_int("response_delay_ms") or 0,
+        drop_connection=_bool("drop_connection"),
+        malformed_response=_bool("malformed_response"),
+        startup_delay_ms=_int("startup_delay_ms") or 0,
+        exit_after_requests=_int("exit_after_requests", allow_none=True),
     )
 
 

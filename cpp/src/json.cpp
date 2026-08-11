@@ -172,6 +172,13 @@ class Parser {
         return out;
       }
       if (c != '\\') {
+        // JSON forbids unescaped U+0000-U+001F inside a string; a literal tab
+        // or newline has to arrive as \t or \n. Python's json rejects the
+        // whole document for these, so accepting them here would be both a
+        // malformed-input bug and a parity divergence.
+        if (static_cast<unsigned char>(c) < 0x20) {
+          return std::nullopt;
+        }
         out.push_back(c);
         continue;
       }
@@ -196,16 +203,26 @@ class Parser {
             return std::nullopt;
           }
           unsigned code_point = *code;
-          if (code_point >= 0xD800 && code_point <= 0xDBFF) {
-            if (!consume('\\') || !consume('u')) {
-              return std::nullopt;
+          if (code_point >= 0xD800 && code_point <= 0xDBFF &&
+              position_ + 1 < text_.size() && text_[position_] == '\\' &&
+              text_[position_ + 1] == 'u') {
+            const std::size_t rewind = position_;
+            position_ += 2;
+            const std::optional<unsigned> low = parse_hex4();
+            if (low && *low >= 0xDC00 && *low <= 0xDFFF) {
+              code_point =
+                  0x10000 + ((code_point - 0xD800) << 10) + (*low - 0xDC00);
+            } else {
+              // Not a pair after all: emit the high surrogate on its own and
+              // let the following escape be handled normally.
+              position_ = rewind;
             }
-            std::optional<unsigned> low = parse_hex4();
-            if (!low || *low < 0xDC00 || *low > 0xDFFF) {
-              return std::nullopt;
-            }
-            code_point = 0x10000 + ((code_point - 0xD800) << 10) + (*low - 0xDC00);
           }
+          // An unpaired surrogate is kept rather than rejected: Python's json
+          // accepts "\ud800" and echoes it back, so rejecting it here would
+          // be a parity divergence.  It is encoded as WTF-8 and decoded again
+          // by the serialiser, which is safe because the incoming line has
+          // already been sanitised to valid UTF-8 before parsing.
           append_utf8(out, code_point);
           break;
         }
@@ -349,26 +366,84 @@ class Parser {
   std::size_t position_ = 0;
 };
 
+void write_escape(std::ostringstream& out, unsigned code_point) {
+  char buffer[7];
+  std::snprintf(buffer, sizeof(buffer), "\\u%04x", code_point);
+  out << buffer;
+}
+
+// Decodes one UTF-8 sequence starting at `index`, advancing past it.  Accepts
+// encoded surrogates (WTF-8), which only ever reach here from an unpaired
+// \uXXXX escape — raw surrogate bytes are already gone, replaced by the
+// sanitising pass that runs before parsing.
+unsigned next_code_point(const std::string& text, std::size_t& index) {
+  const auto byte = [&](std::size_t offset) {
+    return static_cast<unsigned char>(text[index + offset]);
+  };
+  const unsigned char lead = byte(0);
+  const std::size_t remaining = text.size() - index;
+
+  auto is_continuation = [&](std::size_t offset) {
+    return offset < remaining && (byte(offset) & 0xC0) == 0x80;
+  };
+
+  if (lead < 0x80) {
+    index += 1;
+    return lead;
+  }
+  if ((lead & 0xE0) == 0xC0 && is_continuation(1)) {
+    const unsigned value = ((lead & 0x1Fu) << 6) | (byte(1) & 0x3Fu);
+    index += 2;
+    return value >= 0x80 ? value : 0xFFFD;
+  }
+  if ((lead & 0xF0) == 0xE0 && is_continuation(1) && is_continuation(2)) {
+    const unsigned value =
+        ((lead & 0x0Fu) << 12) | ((byte(1) & 0x3Fu) << 6) | (byte(2) & 0x3Fu);
+    index += 3;
+    return value >= 0x800 ? value : 0xFFFD;
+  }
+  if ((lead & 0xF8) == 0xF0 && is_continuation(1) && is_continuation(2) &&
+      is_continuation(3)) {
+    const unsigned value = ((lead & 0x07u) << 18) | ((byte(1) & 0x3Fu) << 12) |
+                           ((byte(2) & 0x3Fu) << 6) | (byte(3) & 0x3Fu);
+    index += 4;
+    return value >= 0x10000 && value <= 0x10FFFF ? value : 0xFFFD;
+  }
+  index += 1;
+  return 0xFFFD;
+}
+
+// Matches json.dumps' default ensure_ascii=True: every non-ASCII character is
+// emitted as \uXXXX, with astral characters written as a UTF-16 surrogate
+// pair (Python prints an emoji as 😀).  Writing raw UTF-8 here would
+// break the byte-identical guarantee for any non-English payload.
 void dump_string(std::ostringstream& out, const std::string& text) {
   out << '"';
-  for (const char c : text) {
+  std::size_t index = 0;
+  while (index < text.size()) {
+    const char c = text[index];
     switch (c) {
-      case '"': out << "\\\""; break;
-      case '\\': out << "\\\\"; break;
-      case '\b': out << "\\b"; break;
-      case '\f': out << "\\f"; break;
-      case '\n': out << "\\n"; break;
-      case '\r': out << "\\r"; break;
-      case '\t': out << "\\t"; break;
+      case '"': out << "\\\""; ++index; continue;
+      case '\\': out << "\\\\"; ++index; continue;
+      case '\b': out << "\\b"; ++index; continue;
+      case '\f': out << "\\f"; ++index; continue;
+      case '\n': out << "\\n"; ++index; continue;
+      case '\r': out << "\\r"; ++index; continue;
+      case '\t': out << "\\t"; ++index; continue;
       default:
-        if (static_cast<unsigned char>(c) < 0x20) {
-          char buffer[7];
-          std::snprintf(buffer, sizeof(buffer), "\\u%04x",
-                        static_cast<unsigned>(static_cast<unsigned char>(c)));
-          out << buffer;
-        } else {
-          out << c;
-        }
+        break;
+    }
+    const unsigned code_point = next_code_point(text, index);
+    if (code_point < 0x20) {
+      write_escape(out, code_point);
+    } else if (code_point < 0x7F) {
+      out << static_cast<char>(code_point);
+    } else if (code_point <= 0xFFFF) {
+      write_escape(out, code_point);
+    } else {
+      const unsigned adjusted = code_point - 0x10000;
+      write_escape(out, 0xD800 + (adjusted >> 10));
+      write_escape(out, 0xDC00 + (adjusted & 0x3FF));
     }
   }
   out << '"';
@@ -532,8 +607,73 @@ std::string Value::dump() const {
   return out.str();
 }
 
+std::string sanitize_utf8(const std::string& text) {
+  // Replaces every ill-formed byte sequence with U+FFFD using the Unicode
+  // "maximal subpart" rule, which is what Python's
+  // bytes.decode("utf-8", errors="replace") does — the step the Python DUT
+  // performs on each line before json.loads sees it.  Doing the same here
+  // keeps the two implementations byte-identical on malformed input, and it
+  // guarantees the parser only ever sees well-formed UTF-8.
+  std::string out;
+  out.reserve(text.size());
+  std::size_t index = 0;
+  const std::size_t size = text.size();
+
+  auto byte = [&](std::size_t offset) {
+    return static_cast<unsigned char>(text[index + offset]);
+  };
+  auto in_range = [&](std::size_t offset, unsigned char low, unsigned char high) {
+    return index + offset < size && byte(offset) >= low && byte(offset) <= high;
+  };
+
+  while (index < size) {
+    const unsigned char lead = byte(0);
+    std::size_t length = 0;
+
+    if (lead < 0x80) {
+      length = 1;
+    } else if (lead >= 0xC2 && lead <= 0xDF) {
+      length = in_range(1, 0x80, 0xBF) ? 2 : 0;
+    } else if (lead == 0xE0) {
+      length = in_range(1, 0xA0, 0xBF) && in_range(2, 0x80, 0xBF) ? 3 : 0;
+    } else if (lead == 0xED) {
+      // Excludes D800-DFFF: surrogates are not valid UTF-8.
+      length = in_range(1, 0x80, 0x9F) && in_range(2, 0x80, 0xBF) ? 3 : 0;
+    } else if ((lead >= 0xE1 && lead <= 0xEC) || lead == 0xEE || lead == 0xEF) {
+      length = in_range(1, 0x80, 0xBF) && in_range(2, 0x80, 0xBF) ? 3 : 0;
+    } else if (lead == 0xF0) {
+      length = in_range(1, 0x90, 0xBF) && in_range(2, 0x80, 0xBF) &&
+                       in_range(3, 0x80, 0xBF)
+                   ? 4
+                   : 0;
+    } else if (lead >= 0xF1 && lead <= 0xF3) {
+      length = in_range(1, 0x80, 0xBF) && in_range(2, 0x80, 0xBF) &&
+                       in_range(3, 0x80, 0xBF)
+                   ? 4
+                   : 0;
+    } else if (lead == 0xF4) {
+      length = in_range(1, 0x80, 0x8F) && in_range(2, 0x80, 0xBF) &&
+                       in_range(3, 0x80, 0xBF)
+                   ? 4
+                   : 0;
+    }
+
+    if (length == 0) {
+      // One replacement per maximal subpart: 0xC0 0xAF is two bad bytes and
+      // therefore two replacement characters, exactly as Python reports it.
+      out += "\xEF\xBF\xBD";
+      index += 1;
+      continue;
+    }
+    out.append(text, index, length);
+    index += length;
+  }
+  return out;
+}
+
 std::optional<Value> parse(const std::string& text) {
-  Parser parser(text);
+  const std::string clean = sanitize_utf8(text);
+  Parser parser(clean);
   return parser.parse_document();
 }
 

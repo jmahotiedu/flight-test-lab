@@ -202,6 +202,59 @@ def test_fault_config_file_drives_injection(evidence_dir: Path) -> None:
 
 
 @pytest.mark.requirement("REQ-FAULT-001")
+@pytest.mark.parametrize(
+    ("config", "expected"),
+    [
+        ({"drop_connection": "false"}, "must be true or false"),
+        ({"malformed_response": 0}, "must be true or false"),
+        ({"response_delay_ms": "400"}, "must be an integer"),
+        ({"response_delay_ms": True}, "must be an integer"),
+        ({"startup_delay_ms": -5}, "must not be negative"),
+        ({"exit_after_requests": 1.5}, "must be an integer"),
+    ],
+)
+def test_fault_config_rejects_wrong_types(
+    tmp_path: Path, config: dict[str, object], expected: str
+) -> None:
+    """A mistyped switch must fail loudly, not coerce.
+
+    `bool("false")` is True, so a hand-written config that says "false" would
+    silently enable the fault it meant to disable — and the resulting run
+    would look like a product defect rather than a configuration error.
+    """
+    from simulator.simulator import load_fault_config
+
+    path = tmp_path / "fault.json"
+    path.write_text(json.dumps(config), encoding="utf-8")
+    with pytest.raises(SystemExit, match=expected):
+        load_fault_config(path)
+
+
+@pytest.mark.requirement("REQ-FAULT-001")
+def test_valid_fault_config_still_loads(tmp_path: Path) -> None:
+    from simulator.simulator import load_fault_config
+
+    path = tmp_path / "fault.json"
+    path.write_text(
+        json.dumps(
+            {
+                "response_delay_ms": 400,
+                "drop_connection": False,
+                "malformed_response": True,
+                "startup_delay_ms": 0,
+                "exit_after_requests": None,
+            }
+        ),
+        encoding="utf-8",
+    )
+    config = load_fault_config(path)
+    assert config.response_delay_ms == 400
+    assert config.drop_connection is False
+    assert config.malformed_response is True
+    assert config.exit_after_requests is None
+
+
+@pytest.mark.requirement("REQ-FAULT-001")
 def test_startup_delay_fault_delays_readiness(evidence_dir: Path) -> None:
     """The DUT must not accept connections until the injected delay elapses.
 

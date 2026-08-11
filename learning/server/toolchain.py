@@ -34,6 +34,7 @@ _ENV_OVERRIDES = {
     "ctest": "FTL_CTEST",
     "cxx": "FTL_CXX",
     "gdb": "FTL_GDB",
+    "ninja": "FTL_NINJA",
 }
 
 _CXX_CANDIDATES = ("g++", "clang++", "c++")
@@ -67,6 +68,10 @@ class Toolchain:
     ctest: str | None = None
     cxx: str | None = None
     gdb: str | None = None
+    # Optional: a single-config generator. Without it CMake falls back to its
+    # platform default, which on Windows is Visual Studio — a build GDB cannot
+    # read symbols from.
+    ninja: str | None = None
 
     @property
     def can_build_cpp(self) -> bool:
@@ -125,6 +130,7 @@ def detect_toolchain() -> Toolchain:
         ctest=resolve("ctest"),
         cxx=_detect_cxx(),
         gdb=resolve("gdb"),
+        ninja=resolve("ninja"),
     )
 
 

@@ -28,7 +28,9 @@ from learning.server.validators import (
 
 # The only tools this validator will ever start.  "dut" is the C++ executable
 # built from cpp/, resolved inside the repository — never taken from args.
-ALLOWED_TOOLS = frozenset({"cmake", "ctest", "gdb", "dut", "gdb-attach"})
+ALLOWED_TOOLS = frozenset(
+    {"cmake", "cmake-configure", "ctest", "gdb", "dut", "gdb-attach"}
+)
 
 DUT_RELATIVE = Path("cpp") / "build" / "bin"
 
@@ -56,7 +58,7 @@ def _dut_path(context: ValidatorContext) -> Path | None:
 def _resolve_tool(tool: str, context: ValidatorContext) -> tuple[str | None, str]:
     """Return (executable, error) for an allowlisted tool name."""
     toolchain = cached_toolchain()
-    if tool == "cmake":
+    if tool in ("cmake", "cmake-configure"):
         return toolchain.cmake, "cmake was not found on this machine"
     if tool == "ctest":
         return toolchain.ctest, "ctest was not found on this machine"
@@ -119,6 +121,16 @@ def _evaluate(
         # problem, not a learner mistake: GDB reads DWARF, and an MSVC build
         # ships PDBs it cannot read.  Say so, instead of leaving a bare
         # "output did not match" for the learner to decode.
+        if "does not match the generator used previously" in combined:
+            # cpp/build already exists and was configured by a different
+            # generator. Everything in it is derived, so deleting it is the
+            # documented fix rather than a risk.
+            interpretation += (
+                ". cpp/build was configured with a different generator. That "
+                "directory is entirely generated, so delete it and re-run: "
+                "rm -rf cpp/build (PowerShell: Remove-Item -Recurse -Force "
+                "cpp/build)"
+            )
         if name == "gdb-attach" and "ptrace: Operation not permitted" in combined:
             # Linux's Yama LSM (ptrace_scope=1, the Ubuntu/Debian default)
             # only lets a parent trace its child. The DUT calls
@@ -225,6 +237,24 @@ def _run_gdb_attach(
     )
 
 
+def _configure_argv(cmake: str) -> list[str]:
+    """cmake configure arguments pinned to the *detected* toolchain.
+
+    A bare `cmake -S cpp -B cpp/build` uses CMake's platform default, which on
+    Windows is Visual Studio even when the detected compiler is g++. The
+    lessons were unlocked by finding g++ and gdb, so the DUT has to be built
+    by that same compiler — otherwise Day 12's mandatory GDB checks face PDB
+    symbols they cannot read.
+    """
+    toolchain = cached_toolchain()
+    argv = [cmake, "-S", "cpp", "-B", "cpp/build"]
+    if toolchain.cxx:
+        argv.append(f"-DCMAKE_CXX_COMPILER={toolchain.cxx}")
+    if toolchain.ninja:
+        argv += ["-G", "Ninja", f"-DCMAKE_MAKE_PROGRAM={toolchain.ninja}"]
+    return argv
+
+
 def run(args: dict[str, Any], context: ValidatorContext) -> CheckResult:
     tool = str(args.get("tool", ""))
     if tool not in ALLOWED_TOOLS:
@@ -242,7 +272,10 @@ def run(args: dict[str, Any], context: ValidatorContext) -> CheckResult:
     if executable is None:
         return _fail(tool, error)
 
-    argv = [executable, *[str(item) for item in args.get("args", [])]]
+    if tool == "cmake-configure":
+        argv = _configure_argv(executable)
+    else:
+        argv = [executable, *[str(item) for item in args.get("args", [])]]
     exit_status, stdout, stderr, duration_ms, timed_out = run_subprocess(
         argv, timeout=timeout, cwd=context.repo_root
     )
