@@ -38,6 +38,28 @@ function el(tag, attrs = {}, ...children) {
   return node;
 }
 
+// Every click that changes server state goes through this. Handlers that
+// awaited before disabling their control let a double-click post twice, and
+// the server counts both: record_quiz bumps quiz_attempts and concept mastery
+// per request, so one choice could be scored several times. The control is
+// disabled *before* the request and re-enabled afterwards unless the handler
+// returns true to keep it disabled.
+function guardedClick(control, handler) {
+  let inFlight = false;
+  control.addEventListener("click", async () => {
+    if (inFlight || control.disabled) return;
+    inFlight = true;
+    control.disabled = true;
+    let keepDisabled = false;
+    try {
+      keepDisabled = await handler();
+    } finally {
+      inFlight = false;
+      if (!keepDisabled) control.disabled = false;
+    }
+  });
+}
+
 function mdInline(text) {
   // Minimal inline formatting: `code` and **bold**. Content is trusted (repo curriculum).
   return String(text)
@@ -199,16 +221,17 @@ function renderFocus(lesson) {
   const footer = el("div", { class: "lesson-footer" });
   const continueBtn = el("button", { class: "primary" }, "Continue");
   const missingBox = el("div", { class: "missing-list" });
-  continueBtn.addEventListener("click", async () => {
+  guardedClick(continueBtn, async () => {
     const { ok, data } = await api.post("/api/complete", { lesson_id: lesson.id });
     if (!ok) {
       missingBox.innerHTML = "";
       missingBox.append(el("div", { class: "feedback-fail" },
         el("b", {}, "Not complete yet: "), (data.missing || []).join("; ")));
-      return;
+      return false;  // still on this lesson, so let them try again
     }
     loadLesson(data.next_lesson_id);
     window.scrollTo(0, 0);
+    return true;  // this view is being replaced
   });
   footer.append(continueBtn);
   if (lesson.progress.complete) {
@@ -231,9 +254,10 @@ function renderBlock(lesson, block, done) {
     }
     const btn = el("button", {}, done ? "✓ Noted" : "Got it");
     btn.disabled = done;
-    btn.addEventListener("click", async () => {
+    guardedClick(btn, async () => {
       await api.post("/api/step", { lesson_id: lesson.id, block_id: block.id, kind: "learn" });
-      btn.textContent = "✓ Noted"; btn.disabled = true; box.classList.add("done");
+      btn.textContent = "✓ Noted"; box.classList.add("done");
+      return true;  // stays acknowledged
     });
     box.append(btn);
   }
@@ -243,6 +267,7 @@ function renderBlock(lesson, block, done) {
     const options = el("div", { class: "options" });
     const feedback = el("div");
     const alreadyCorrect = lesson.progress.quiz_correct.includes(block.id);
+    let quizInFlight = false;
     block.options.forEach((option, index) => {
       // html:, not a child — el() appends a string as a text node, so the
       // markup mdInline() produces would show up as literal "<code>ruff
@@ -250,9 +275,23 @@ function renderBlock(lesson, block, done) {
       const opt = el("button", { html: mdInline(option) });
       if (alreadyCorrect && index === block.answer_index) opt.classList.add("chosen-correct");
       opt.addEventListener("click", async () => {
-        const { data } = await api.post("/api/step", {
-          lesson_id: lesson.id, block_id: block.id, kind: block.type, answer_index: index,
-        });
+        // Guarded across the whole option group, not per button: a second
+        // click on any option before the first reply landed posted again, and
+        // record_quiz bumps quiz_attempts and concept mastery per request.
+        if (quizInFlight || opt.disabled) return;
+        quizInFlight = true;
+        options.querySelectorAll("button").forEach((b) => (b.disabled = true));
+        let data;
+        try {
+          ({ data } = await api.post("/api/step", {
+            lesson_id: lesson.id, block_id: block.id, kind: block.type, answer_index: index,
+          }));
+        } catch (error) {
+          quizInFlight = false;
+          options.querySelectorAll("button").forEach((b) => (b.disabled = false));
+          throw error;
+        }
+        quizInFlight = false;
         options.querySelectorAll("button").forEach((b) => b.classList.remove("chosen-wrong"));
         if (data.correct) {
           opt.classList.add("chosen-correct");
@@ -264,6 +303,7 @@ function renderBlock(lesson, block, done) {
           refreshTopbar();
         } else {
           opt.classList.add("chosen-wrong");
+          options.querySelectorAll("button").forEach((b) => (b.disabled = false));
           feedback.innerHTML = "";
           feedback.append(el("div", { class: "feedback-fail" },
             block.type === "quiz"
@@ -297,9 +337,10 @@ function renderBlock(lesson, block, done) {
     if (block.command) box.append(el("pre", {}, el("code", {}, block.command)));
     const btn = el("button", {}, done ? "✓ Done" : "I did this");
     btn.disabled = done;
-    btn.addEventListener("click", async () => {
+    guardedClick(btn, async () => {
       await api.post("/api/step", { lesson_id: lesson.id, block_id: block.id, kind: "do" });
-      btn.textContent = "✓ Done"; btn.disabled = true; box.classList.add("done");
+      btn.textContent = "✓ Done"; box.classList.add("done");
+      return true;  // stays acknowledged
     });
     box.append(btn);
   }
@@ -312,20 +353,29 @@ function renderBlock(lesson, block, done) {
       resultZone.append(el("div", { class: "feedback-pass" }, "Check passed" +
         (block.success_note ? " — " + block.success_note : "")));
     }
-    runBtn.addEventListener("click", async () => {
-      runBtn.disabled = true;
+    guardedClick(runBtn, async () => {
       runBtn.textContent = "Running…";
       resultZone.innerHTML = "";
       const { data } = await api.post("/api/validate", { lesson_id: lesson.id, block_id: block.id });
-      runBtn.disabled = false;
       runBtn.textContent = "Run check";
       if (data.error) {
         resultZone.append(el("div", { class: "feedback-fail" }, data.error));
         return;
       }
       resultZone.append(renderCheckResult(data));
-      if (data.passed) {
-        box.classList.add("done");
+      if (data.passed) box.classList.add("done");
+      // Reloaded on failure too. record_validation revokes a completed
+      // lesson's status when a *mandatory* check goes red, so leaving the
+      // page as it was would keep the LESSON COMPLETE badge on something the
+      // server has already un-completed.
+      if (block.mandatory || data.passed) {
+        const fresh = await api.get("/api/lesson/" + encodeURIComponent(lesson.id));
+        if (state.lesson && state.lesson.id === fresh.id) {
+          state.lesson = fresh;
+          renderFocus(fresh);
+          document.getElementById("block-" + block.id)
+            ?.scrollIntoView({ block: "center" });
+        }
         refreshTopbar();
       }
     });
@@ -342,9 +392,9 @@ function renderBlock(lesson, block, done) {
     const area = el("textarea", { placeholder: "Answer in your own words…" });
     const btn = el("button", { class: "primary" }, "Submit");
     const feedback = el("div");
-    btn.addEventListener("click", async () => {
+    guardedClick(btn, async () => {
       const answer = area.value.trim();
-      if (!answer) return;
+      if (!answer) return false;
       const { data } = await api.post("/api/step", {
         lesson_id: lesson.id, block_id: block.id, kind: "explain", answer_text: answer,
       });
@@ -469,9 +519,15 @@ async function renderRoadmap() {
 /* ---------- interview ---------- */
 
 let interviewCurrent = null;
+// Bumped whenever the displayed question changes. An answer posted for the
+// previous question could otherwise return after Next had already loaded a new
+// one, render its feedback underneath it, and disable the new answer field.
+let interviewToken = 0;
 
 async function nextInterviewQuestion() {
+  const token = ++interviewToken;
   const data = await api.get("/api/interview");
+  if (token !== interviewToken) return;
   interviewCurrent = data;
   document.getElementById("interview-question").textContent = data.question;
   document.getElementById("interview-answer").value = "";
@@ -491,15 +547,21 @@ async function submitInterviewAnswer() {
   const answer = document.getElementById("interview-answer").value.trim();
   if (!answer) return;
   submit.disabled = true;
+  const token = interviewToken;
+  const questionId = interviewCurrent.id;
   let data;
   try {
     ({ data } = await api.post("/api/interview/answer", {
-      question_id: interviewCurrent.id, answer_text: answer,
+      question_id: questionId, answer_text: answer,
     }));
   } catch (error) {
     submit.disabled = false;  // a failed submission must stay retryable
     throw error;
   }
+  // The learner may have pressed Next while this was in flight. The answer is
+  // recorded either way — it was a real answer — but its feedback must not
+  // land under a different question.
+  if (token !== interviewToken) return;
   const feedback = document.getElementById("interview-feedback");
   feedback.innerHTML = "";
   feedback.append(

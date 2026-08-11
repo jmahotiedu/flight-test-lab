@@ -260,3 +260,40 @@ def test_the_teardown_lesson_describes_pytest_as_it_behaves(tmp_path: Path) -> N
         [b for b in lesson.blocks if b["type"] == "learn"], ensure_ascii=False
     )
     assert "only runs if control returns" not in prose
+
+
+def test_lesson_line_references_point_at_the_code_they_name() -> None:
+    """A lesson that cites a line number is asserting something about a file.
+
+    Day 6 sent learners to conftest.py lines 64-66 for the readiness call; the
+    fixture had moved and those lines were the middle of dut_command's CMake
+    hint. Nothing failed, because prose is the part of the curriculum no
+    validator runs — so the reference is recomputed here instead.
+    """
+    curriculum = load_curriculum(LEARNING_ROOT, validator_names())
+    lesson = curriculum.lessons["d6-readiness-polling"]
+    instructions = next(b for b in lesson.blocks if b["type"] == "do")["instructions"]
+
+    source = (REPO_ROOT / "tests" / "conftest.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    spans = {
+        node.name: (node.lineno, node.end_lineno)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef)
+    }
+    port_start, port_end = spans["reserve_local_port"]
+    readiness = [
+        number
+        for number, line in enumerate(source.splitlines(), 1)
+        if "wait_until_ready" in line
+    ]
+    assert len(readiness) == 1, f"ambiguous readiness call: lines {readiness}"
+
+    assert f"lines {port_start}-{port_end}" in instructions, (
+        f"reserve_local_port is at {port_start}-{port_end}; the lesson cites "
+        "something else"
+    )
+    assert f"line {readiness[0]}" in instructions, (
+        f"wait_until_ready is called on line {readiness[0]}; the lesson cites "
+        "something else"
+    )

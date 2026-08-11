@@ -137,3 +137,36 @@ def test_a_quiz_answered_earlier_is_disabled_on_reload() -> None:
     assert "disabled = true" in branch.group(1), (
         "the restore branch does not disable the options"
     )
+
+
+def test_state_changing_clicks_disable_before_they_post() -> None:
+    """A handler that awaits before disabling can be clicked twice.
+
+    The server counts both: record_quiz bumps quiz_attempts and concept
+    mastery per request, and the Day 14 drill counts raw interview answers, so
+    one choice submitted five times satisfied a five-answer gate. There is no
+    JS runtime here, so the rule is enforced structurally: every click handler
+    that posts must go through guardedClick, hold an explicit in-flight flag,
+    or disable its control before the await.
+    """
+    source = APP_JS.read_text(encoding="utf-8")
+    unguarded = []
+    for match in re.finditer(r"addEventListener\(\"click\", async \(\) => \{", source):
+        # The handler body, up to the await that changes server state.
+        tail = source[match.end() :]
+        post = tail.find("await api.post")
+        if post < 0:
+            continue
+        before = tail[:post]
+        guarded = (
+            "InFlight" in before
+            or "disabled = true" in before
+            or "disabled) return" in before
+        )
+        if not guarded:
+            line = source[: match.start()].count("\n") + 1
+            unguarded.append(f"line {line}")
+    assert not unguarded, (
+        "these click handlers post before disabling anything, so a "
+        f"double-click posts twice: {unguarded}"
+    )
