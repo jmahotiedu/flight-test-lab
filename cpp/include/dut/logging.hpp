@@ -9,7 +9,9 @@
 
 namespace dut {
 
-enum class Level { Info, Warning, Error };
+// Debug records are emitted only under --verbose, which is what makes
+// that flag observable — the Python DUT has the same pairing.
+enum class Level { Debug, Info, Warning, Error };
 
 // Opens the log file (appending) in addition to stderr, creating its parent
 // directory the way the Python DUT does.  Returns false when the requested

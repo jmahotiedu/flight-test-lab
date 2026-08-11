@@ -118,6 +118,14 @@ def load_fault_config(path: Path) -> FaultConfig:
 def resolve_fault_config(args: argparse.Namespace) -> FaultConfig:
     """Combine --fault / --fault-delay-ms / --fault-config into one config."""
     if args.fault_config is not None:
+        # Silently letting the manifest win would mean the command line no
+        # longer describes the experiment that ran — the worst property for
+        # something whose output is evidence.
+        if args.fault is not None:
+            raise SystemExit(
+                "--fault and --fault-config both select the fault behaviour; "
+                "pass only one so the command line describes the run"
+            )
         return load_fault_config(args.fault_config)
     delay = int(args.fault_delay_ms)
     # A negative delay silently disables the fault at both runtime guards
@@ -246,6 +254,17 @@ class DutRequestHandler(socketserver.StreamRequestHandler):
                 )
                 return
 
+            # DEBUG records exist so --verbose has something to show: the
+            # byte-level detail you want when a request looks wrong on the
+            # wire but fine in the summary line above.
+            LOGGER.debug(
+                "request_bytes peer=%s:%s length=%d raw=%r",
+                peer[0],
+                peer[1],
+                len(line),
+                line,
+            )
+
             message, decoded = decode_request(raw_line)
             if not decoded:
                 response: dict[str, Any] = {
@@ -277,6 +296,13 @@ class DutRequestHandler(socketserver.StreamRequestHandler):
             )
             self.wfile.flush()
             LOGGER.info("response peer=%s:%s payload=%s", peer[0], peer[1], response)
+            LOGGER.debug(
+                "response_detail peer=%s:%s error_code=%s keys=%s",
+                peer[0],
+                peer[1],
+                response.get("error_code"),
+                sorted(response),
+            )
 
         LOGGER.info("client_disconnected peer=%s:%s", peer[0], peer[1])
 

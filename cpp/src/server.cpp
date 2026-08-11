@@ -159,6 +159,11 @@ void handle_connection(Socket connection, std::string peer,
       // evidence reader would fail depending on which DUT produced it.
       log_message(Level::Info,
                   "request peer=" + peer + " payload=" + sanitize_utf8(line));
+      // Byte-level detail, only under --verbose, mirroring the Python DUT's
+      // DEBUG records: what you want when a request looks wrong on the wire
+      // but fine in the summary line above.
+      log_message(Level::Debug, "request_bytes peer=" + peer + " length=" +
+                                    std::to_string(line.size()));
       const int request_number = ++g_request_count;
       if (maybe_inject_fault(options, request_number)) {
         return;

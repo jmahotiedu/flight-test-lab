@@ -276,13 +276,11 @@ def test_startup_delay_fault_delays_readiness(evidence_dir: Path) -> None:
     )
     dut = next(dut_iter)
     try:
-        # Immediately after launch the port must still be closed.
-        with (
-            pytest.raises(OSError),
-            socket.create_connection((dut.host, dut.port), timeout=0.2),
-        ):
-            pass
-
+        # Deliberately *not* asserting that the port is closed right now: this
+        # process can be descheduled for longer than the delay on a loaded
+        # host, and a correctly-delayed DUT would then already be listening.
+        # The measured time-to-ready below proves the delay without depending
+        # on when this thread happens to run.
         client = LabClient(dut.host, dut.port)
         try:
             client.wait_until_ready(deadline_seconds=15.0)

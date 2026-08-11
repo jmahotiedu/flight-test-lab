@@ -83,9 +83,15 @@ def _check_json_fields(
         if rule == "object":
             if not isinstance(value, dict) or not value:
                 failures.append(f"{relative}: {field!r} must be a non-empty object")
-            elif any(v in ("", None, 0) for v in value.values()):
+            # Only an empty string is a placeholder. `false`, `0` and `null`
+            # are legitimate settings — a nominal run genuinely records
+            # drop_connection: false and startup_delay_ms: 0 — and rejecting
+            # them would fail a learner who wrote down the real configuration.
+            # (Note `False == 0` in Python, so a membership test against 0
+            # would have swept up every disabled boolean too.)
+            elif any(isinstance(v, str) and not v.strip() for v in value.values()):
                 failures.append(
-                    f"{relative}: {field!r} still has placeholder values "
+                    f"{relative}: {field!r} still has empty placeholder values "
                     f"({_describe(value)}) — fill in the real configuration"
                 )
             continue

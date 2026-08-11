@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import ast
 import csv
+import re
 from pathlib import Path
 
 import pytest
@@ -36,6 +37,32 @@ def _defined_functions(path: Path) -> set[str]:
     }
 
 
+def _registered_ctest_names() -> set[str]:
+    """Test names CMakeLists registers with add_test, without running cmake."""
+    text = (REPO_ROOT / "cpp" / "CMakeLists.txt").read_text(encoding="utf-8")
+    names = set(re.findall(r"add_test\(NAME\s+([^\s)]+)", text))
+    cases = re.search(r"set\(DUT_TEST_CASES(.*?)\)", text, re.DOTALL)
+    if cases:
+        prefixed = {f"protocol.{case}" for case in cases.group(1).split()}
+        names = {name for name in names if "${" not in name} | prefixed
+    return names
+
+
+def _check_ctest_row(row: dict[str, str], file_part: str, pattern: str) -> list[str]:
+    """Validate a cpp/ traceability row against the sources and CMakeLists."""
+    problems: list[str] = []
+    if not (REPO_ROOT / file_part).is_file():
+        problems.append(f"{row['requirement_id']}: no such file {file_part}")
+    registered = _registered_ctest_names()
+    prefix = pattern.rstrip("*")
+    if prefix and not any(name.startswith(prefix) for name in sorted(registered)):
+        problems.append(
+            f"{row['requirement_id']}: no CTest case matching {pattern!r} is "
+            f"registered (registered: {sorted(registered)})"
+        )
+    return problems
+
+
 def test_every_mapped_test_exists() -> None:
     """A row naming a test that no longer exists is a broken chain.
 
@@ -45,9 +72,16 @@ def test_every_mapped_test_exists() -> None:
     missing: list[str] = []
     for row in _rows(TRACEABILITY):
         node_id = row["test_case"].strip()
-        if "::" not in node_id or node_id.startswith("cpp/"):
-            continue  # CTest rows are covered by ctest itself
+        if "::" not in node_id:
+            continue
         file_part, _, test_name = node_id.partition("::")
+        if file_part.startswith("cpp/"):
+            # Skipping these entirely would let the row name a file that does
+            # not exist, or a CTest case nobody registered, and stay green:
+            # running ctest proves the *registered* tests pass, never that the
+            # CSV points at them.
+            missing.extend(_check_ctest_row(row, file_part, test_name))
+            continue
         target = REPO_ROOT / file_part
         if not target.is_file():
             missing.append(f"{row['requirement_id']}: no such file {file_part}")

@@ -4,6 +4,7 @@
 #include <cerrno>
 #include <charconv>
 #include <cmath>
+#include <limits>
 #include <cstdio>
 #include <cstdlib>
 #include <sstream>
@@ -105,6 +106,27 @@ class Parser {
       case 'n':
         return consume_literal("null") ? std::optional<Value>(Value(nullptr))
                                        : std::nullopt;
+      // Python's json accepts the non-finite constants NaN, Infinity and
+      // -Infinity by default and echoes them back, so the native parser has
+      // to as well: rejecting them would make a document's meaning depend on
+      // which DUT answered. They are not part of the JSON grammar proper —
+      // the serialiser already emits the same spellings.
+      case 'N':
+        return consume_literal("NaN")
+                   ? std::optional<Value>(
+                         Value(std::numeric_limits<double>::quiet_NaN()))
+                   : std::nullopt;
+      case 'I':
+        return consume_literal("Infinity")
+                   ? std::optional<Value>(
+                         Value(std::numeric_limits<double>::infinity()))
+                   : std::nullopt;
+      case '-':
+        if (text_.compare(position_, 9, "-Infinity") == 0) {
+          position_ += 9;
+          return Value(-std::numeric_limits<double>::infinity());
+        }
+        return parse_number();
       default:
         return parse_number();
     }

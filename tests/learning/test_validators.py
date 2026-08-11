@@ -219,10 +219,30 @@ MANIFEST_SPEC = {
                 "commit": "abc1234",
                 "python_version": "3.11",
                 "platform": "win32",
-                "dut_config": {"host": "127.0.0.1", "port": 0},
+                "dut_config": {"host": "", "port": 9000},
                 "timestamp": "2026-08-11T00:00:00+00:00",
             },
             "placeholder values",
+        ),
+        (
+            {
+                "commit": "abc1234",
+                "python_version": "3.11",
+                "platform": "win32",
+                "dut_config": {"host": "127.0.0.1", "port": 9000},
+                "timestamp": "2026-08-11",
+            },
+            "no time of day",
+        ),
+        (
+            {
+                "commit": "abc1234",
+                "python_version": "3.11",
+                "platform": "win32",
+                "dut_config": {"host": "127.0.0.1", "port": 9000},
+                "timestamp": "2026-08-11T04:12:33",
+            },
+            "no UTC offset",
         ),
     ],
 )
@@ -281,6 +301,49 @@ def test_artifact_check_accepts_a_filled_in_manifest(manifest_in_repo: Path) -> 
         check=True,
     ).stdout.strip()
     manifest_in_repo.write_text(_manifest(head), encoding="utf-8")
+    result = run_validator(
+        "artifact_check",
+        {
+            "file": str(manifest_in_repo.relative_to(REPO_ROOT).as_posix()),
+            "json_fields": MANIFEST_SPEC,
+        },
+        CONTEXT,
+    )
+    assert result.passed, result.interpretation
+
+
+def test_disabled_settings_are_not_placeholders(manifest_in_repo: Path) -> None:
+    """A nominal run records drop_connection: false and startup_delay_ms: 0.
+
+    Those are real settings, not an unfilled skeleton — and because False == 0
+    in Python, a membership test against 0 would have rejected every disabled
+    boolean a learner correctly wrote down.
+    """
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    manifest_in_repo.write_text(
+        json.dumps(
+            {
+                "commit": head,
+                "python_version": "3.11.9",
+                "platform": "win32",
+                "dut_config": {
+                    "host": "127.0.0.1",
+                    "port": 9000,
+                    "drop_connection": False,
+                    "startup_delay_ms": 0,
+                    "exit_after_requests": None,
+                },
+                "timestamp": "2026-08-11T04:12:33+00:00",
+            }
+        ),
+        encoding="utf-8",
+    )
     result = run_validator(
         "artifact_check",
         {

@@ -203,6 +203,14 @@ class LearningHandler(BaseHTTPRequestHandler):
             "flow": lesson.flow,
             "blocks": list(lesson.blocks),
             "hint_count": len(lesson.hints),
+            # Hints already revealed come back with the lesson, so reopening it
+            # shows what the learner has already paid for. Without this, a
+            # reload leaves the hint area empty and — once every hint is used —
+            # the button reads "No more hints" with nothing to read.
+            "revealed_hints": [
+                {"level": hint["level"], "text": hint["text"]}
+                for hint in lesson.hints[: int(record.get("hints_used", 0) or 0)]
+            ],
             "requirements": list(lesson.requirements),
             "progress": {
                 "status": record.get("status", "not_started"),

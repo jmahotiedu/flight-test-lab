@@ -310,8 +310,13 @@ def _configure_argv(cmake: str, context: ValidatorContext) -> list[str]:
     # is one the very next check has to reject.
     if toolchain.ninja:
         argv += ["-G", "Ninja", f"-DCMAKE_MAKE_PROGRAM={toolchain.ninja}"]
-    elif sys.platform == "win32" and toolchain.make:
-        argv += ["-G", "MinGW Makefiles", f"-DCMAKE_MAKE_PROGRAM={toolchain.make}"]
+    elif toolchain.make:
+        # Name the make program explicitly on every platform. Detection may
+        # have found it via FTL_MAKE or a fallback directory rather than PATH,
+        # and CMake searches PATH — so omitting it here would fail a configure
+        # on the very host whose capability check just passed.
+        generator = "MinGW Makefiles" if sys.platform == "win32" else "Unix Makefiles"
+        argv += ["-G", generator, f"-DCMAKE_MAKE_PROGRAM={toolchain.make}"]
     return argv
 
 

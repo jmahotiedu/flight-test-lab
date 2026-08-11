@@ -33,6 +33,12 @@ def main() -> int:
         help="Do not open a browser window automatically.",
     )
     args = parser.parse_args()
+    # Validate before binding: an out-of-range port otherwise reaches socket
+    # bind and exits with an OverflowError traceback, which reads like a crash
+    # rather than the argument mistake it is. 0 stays legal — it means "pick a
+    # free one", which is this program's default.
+    if not 0 <= args.port <= 65535:
+        raise SystemExit("--port must be 0 (auto) or between 1 and 65535")
 
     repo_root = Path(__file__).resolve().parent.parent
     try:

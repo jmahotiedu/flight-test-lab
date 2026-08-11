@@ -153,6 +153,13 @@ function renderFocus(lesson) {
   // hints
   if (lesson.hint_count > 0) {
     const hintZone = el("div", { id: "hint-zone" });
+    // Re-render hints revealed in an earlier session: progress is advertised
+    // as resumable, and a hint you already spent should still be readable.
+    for (const hint of lesson.revealed_hints || []) {
+      hintZone.append(
+        el("div", { class: "hint-box" }, el("b", {}, `Hint ${hint.level}: `), hint.text),
+      );
+    }
     const hintBtn = el("button", {}, `Hint (${Math.min(state.hintIndex + 1, lesson.hint_count)}/${lesson.hint_count})`);
     hintBtn.addEventListener("click", async () => {
       if (state.hintIndex >= lesson.hint_count) return;

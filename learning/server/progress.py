@@ -50,8 +50,13 @@ def _record_is_valid(section: str, record: dict[str, Any]) -> bool:
     if section == "lessons":
         integer_fields = ("attempts", "hints_used", "quiz_attempts")
         list_fields = ("steps_done", "quiz_correct", "explain_done")
-    elif section == "concepts" or section == "interview":
+    elif section == "concepts":
         integer_fields = ("correct", "incorrect")
+    elif section == "interview":
+        # streak is read with int() when weighting questions, so a non-integer
+        # here raises ValueError on the first /api/interview instead of taking
+        # the documented reset path.
+        integer_fields = ("correct", "incorrect", "streak")
     else:
         return True
 

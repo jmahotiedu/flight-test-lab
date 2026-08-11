@@ -19,6 +19,8 @@ bool g_verbose = false;
 
 const char* level_name(Level level) {
   switch (level) {
+    case Level::Debug:
+      return "DEBUG";
     case Level::Warning:
       return "WARNING";
     case Level::Error:
@@ -75,6 +77,9 @@ bool configure_logging(const std::string& log_file, bool verbose) {
 }
 
 void log_message(Level level, const std::string& message) {
+  if (level == Level::Debug && !g_verbose) {
+    return;  // --verbose is the only thing that makes these visible
+  }
   const std::string line = utc_timestamp() + " level=" + level_name(level) +
                            " message=" + message;
   std::lock_guard<std::mutex> guard(g_log_mutex);

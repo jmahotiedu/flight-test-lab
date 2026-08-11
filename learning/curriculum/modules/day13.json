@@ -102,10 +102,15 @@
           "id": "verify-shape",
           "validator": "source_check",
           "mandatory": true,
-          "description": "Checks that src/testlab/bench.py exists, defines BenchLock, and is annotated — src/ is under strict mypy, so an untyped implementation would fail the quality gate you ran on Day 10.",
+          "description": "Checks that src/testlab/bench.py defines an annotated BenchLock built on an exclusive-create primitive (O_EXCL, or open mode 'x'). A behavioural probe cannot tell an atomic create from a check-then-write — both look right when run sequentially — so the one property this lesson exists to teach has to be checked in the source.",
           "args": {
             "file": "src/testlab/bench.py",
-            "must_contain": ["class BenchLock", "-> bool", "-> None"],
+            "must_contain": [
+              "class BenchLock",
+              "-> bool",
+              "-> None",
+              "O_EXCL|open\\([^)]*['\"]x"
+            ],
             "success_note": "src/testlab/bench.py defines an annotated BenchLock — the shape is in place, and it will survive `mypy src simulator learning`."
           }
         },
