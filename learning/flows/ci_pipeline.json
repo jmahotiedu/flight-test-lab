@@ -1,0 +1,45 @@
+{
+  "title": "CI pipeline flow",
+  "stages": [
+    {
+      "name": "trigger",
+      "what": "push to main or a pull_request event starts the workflow.",
+      "why": "Every change gets the same gates, whether or not a human remembers to run them.",
+      "source": ".github/workflows/ci.yml (on:)",
+      "concepts": "CI triggers",
+      "failures": "A branch nobody pushes to a PR never gets checked."
+    },
+    {
+      "name": "runner",
+      "what": "GitHub provisions a fresh ubuntu-latest VM (GitLab: python:3.12-bookworm container) with timeout-minutes: 10.",
+      "why": "A clean machine proves the repo is self-contained — nothing works 'because of my laptop'.",
+      "source": ".github/workflows/ci.yml (runs-on)",
+      "concepts": "runners, images",
+      "failures": "Dependencies not declared in pyproject.toml fail here even though they pass locally."
+    },
+    {
+      "name": "install",
+      "what": "pip install -e '.[dev]' with pip caching keyed on the dependency files.",
+      "why": "The editable install is exactly what a new contributor does — CI tests the onboarding path too.",
+      "source": ".github/workflows/ci.yml (Install project)",
+      "concepts": "packaging, caching",
+      "failures": "A stale cache is a rare but real source of 'works locally, red in CI'."
+    },
+    {
+      "name": "quality gates",
+      "what": "ruff check → ruff format --check → mypy → pytest, each exiting nonzero on failure.",
+      "why": "The runner sees only exit codes; every tool's exit status is a contract.",
+      "source": ".github/workflows/ci.yml (Lint/Type check/Run tests)",
+      "concepts": "exit codes, gates",
+      "failures": "Piping a command can hide its exit code — the pipeline's truth is the step's exit status."
+    },
+    {
+      "name": "artifacts",
+      "what": "upload-artifact with if: always() ships evidence/ (JUnit, DUT log, coverage) even when a step failed.",
+      "why": "Failures are exactly when you need the logs. always() is the difference between diagnosable and guesswork.",
+      "source": ".github/workflows/ci.yml (Upload evidence)",
+      "concepts": "artifacts, evidence",
+      "failures": "if-no-files-found: error turns 'evidence silently missing' into a loud failure."
+    }
+  ]
+}

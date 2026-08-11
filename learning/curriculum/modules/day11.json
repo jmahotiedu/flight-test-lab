@@ -1,0 +1,260 @@
+{
+  "lessons": [
+    {
+      "id": "d11-cpp-dut",
+      "title": "The same protocol, compiled: reading the C++ DUT",
+      "objective": "Read cpp/ as a C++ engineer would — header/source split, what a translation unit is, and why RAII replaces the cleanup code you would otherwise have to remember to write.",
+      "estimated_minutes": 18,
+      "status": "available",
+      "requires": ["cpp-build"],
+      "concepts": ["cpp-integration", "protocol-design"],
+      "prerequisites": ["d10-failing-check-evidence"],
+      "source_files": ["cpp/include/dut/server.hpp", "cpp/src/server.cpp", "cpp/src/protocol.cpp", "simulator/simulator.py"],
+      "requirements": ["REQ-CPP-001"],
+      "blocks": [
+        {
+          "type": "learn",
+          "id": "learn",
+          "text": "`cpp/` is the same DUT you have been testing all fortnight, written in C++.\n\nThe split is the first thing to read:\n\n* **`include/dut/*.hpp`** — declarations. What exists, what it promises.\n* **`src/*.cpp`** — definitions. Each `.cpp` is a **translation unit**: compiled alone into a `.o`, then linked together.\n\nPython has no such step — `import` finds and executes source at runtime. C++ resolves everything before the program runs, which is why a typo in a rarely-taken branch fails your **build**, not your 3 a.m. test run.\n\nThe second thing to read is `Socket` in `server.hpp`: it owns one OS handle, closes it in its destructor, and deletes its copy constructor.",
+          "more": "Why deleting the copy constructor matters: an OS socket handle is a *resource with an owner*, and copying the wrapper would give you two owners that each close the same handle — a double close, which on a busy server can close some *other* connection that reused the number. Deleting copy and defining move makes that a compile error instead of a Tuesday-afternoon mystery.\n\nThis is RAII: Resource Acquisition Is Initialisation. Acquire in the constructor, release in the destructor, and the release happens on *every* exit path — normal return, early return, or a thrown exception unwinding the stack. It is the same idea as Python's `with` block and `LabClient.__exit__`, except you get it once at the type level instead of remembering a `with` at every use site.\n\nNote also `handle_connection(Socket connection, ...)`: the socket is taken **by value** and moved into the thread, so that thread owns the handle and closes it however it exits. Ownership is written into the signature."
+        },
+        {
+          "type": "predict",
+          "id": "predict",
+          "question": "handle_connection() takes its Socket by value and the thread is detached. When does the socket get closed?",
+          "options": [
+            "Never — a detached thread leaks its arguments",
+            "When handle_connection returns, by ~Socket() on the moved-in value",
+            "When the server shuts down and closes all sockets in a loop",
+            "Only if the client disconnects first"
+          ],
+          "answer_index": 1,
+          "reveal": "The parameter is an ordinary local object owned by that thread. Whichever way handle_connection leaves — falling off the end, an early `return` after send_failed, or an exception unwinding — the destructor runs and the handle is closed. Nothing in the code says \"close\", and nothing has to."
+        },
+        {
+          "type": "do",
+          "id": "do",
+          "instructions": "Read the two files side by side and answer three questions from the source:\n\n```code cpp/include/dut/server.hpp cpp/src/protocol.cpp simulator/simulator.py\n```\n\n1. In `protocol.cpp`, find `build_response()`. Compare it to `build_response()` in `simulator/simulator.py` — which error codes are produced, and in what order are the checks made?\n2. In `server.hpp`, find `WinsockGuard`. What does its destructor do, and why is that a class rather than a `WSACleanup()` call at the end of main?\n3. In `server.cpp`, find where `Socket connection(accepted);` becomes the thread's argument. Which line transfers ownership?\n\nThen prove the two implementations really agree — build first if you have not yet:\n\n```cmake -S cpp -B cpp/build\ncmake --build cpp/build\n```",
+          "command": "cmake --build cpp/build"
+        },
+        {
+          "type": "verify",
+          "id": "verify-build",
+          "validator": "toolchain_check",
+          "mandatory": true,
+          "description": "Builds cpp/ with CMake and requires both the executable and the test binary to exist afterwards.",
+          "args": {
+            "tool": "cmake",
+            "args": ["--build", "cpp/build"],
+            "expect_exit": 0,
+            "artifact": "cpp/build/bin",
+            "timeout_seconds": 120,
+            "success_note": "The C++ DUT compiled and linked. cpp/build/bin now holds a native executable built from the sources you just read."
+          }
+        },
+        {
+          "type": "verify",
+          "id": "verify-parity",
+          "validator": "pytest_check",
+          "mandatory": true,
+          "description": "Runs the parity suite: the same bytes are sent to both DUTs and the replies must match exactly.",
+          "args": {
+            "nodeids": ["tests/test_cpp_dut.py"],
+            "expect": "pass",
+            "junit_contains": ["test_cpp_dut_is_byte_identical_to_python"],
+            "timeout_seconds": 180,
+            "success_note": "Both DUTs answered byte-identically across every request shape, met the 250 ms deadline, and wrote the same evidence fields. The harness genuinely does not care which one it is driving."
+          }
+        },
+        {
+          "type": "quiz",
+          "id": "quiz",
+          "question": "Why can build_response() be tested by CTest without opening a socket?",
+          "options": [
+            "CTest stubs out the network layer automatically",
+            "Because it is a pure function of its argument — no socket, no clock, no global state — so it lives in dut_core and the test binary links that library directly",
+            "Because the test binary runs the server in a background thread first",
+            "It cannot; the CTest cases start a real server on a random port"
+          ],
+          "answer_index": 1,
+          "explanation": "The same separation the Python DUT has: protocol logic is a pure function, so its whole contract is testable in microseconds, and only the parts that genuinely need a live process (sockets, threads, cleanup) require a running DUT. dut_tests links dut_core and calls the function; no port is ever bound."
+        },
+        {
+          "type": "explain",
+          "id": "explain",
+          "question": "The Python DUT never has to declare that it links against a socket library, but cpp/CMakeLists.txt says `target_link_libraries(dut_core PUBLIC ws2_32)` on Windows. What does that line do, and what error appears if you delete it?",
+          "keywords": ["link", "symbol", "winsock", "ws2_32", "resolve"],
+          "sample_answer": "It tells the linker to resolve the Winsock symbols (socket, bind, listen, recv…) against ws2_32. The compiler is happy without it — the declarations come from <winsock2.h> — so the failure appears only at link time as unresolved external symbols such as __imp_socket. Compilation checks that a name was declared; linking checks that it actually exists somewhere."
+        }
+      ],
+      "hints": [
+        { "level": 1, "text": "Read the header before the source. A header is the promise; the .cpp is how the promise is kept." },
+        { "level": 2, "text": "Ownership questions are answered by signatures: `Socket(const Socket&) = delete;` means 'you may not copy me', and a by-value parameter plus std::move at the call site means 'you now own this'." },
+        { "level": 3, "text": "The ownership transfer is `std::thread(handle_connection, std::move(connection), ...)` in run_server — std::move turns the local Socket into an rvalue the thread's parameter can move-construct from, leaving the local one holding kInvalidSocket." },
+        { "level": 4, "text": "If the build fails with 'ninja: command not found' or no generator, run `cmake -S cpp -B cpp/build` first — that configure step is what writes the build files the --build step consumes." }
+      ]
+    },
+    {
+      "id": "d11-cmake-ctest",
+      "title": "CMake and CTest: configure, build, test",
+      "objective": "Drive the native build yourself — configure, build, inspect the build directory, run CTest, and read a deliberately broken build's error the way you read a failing test.",
+      "estimated_minutes": 20,
+      "status": "available",
+      "requires": ["cpp-build"],
+      "concepts": ["cpp-integration", "ci-cd"],
+      "prerequisites": ["d11-cpp-dut"],
+      "source_files": ["cpp/CMakeLists.txt"],
+      "requirements": ["REQ-CPP-001"],
+      "blocks": [
+        {
+          "type": "learn",
+          "id": "learn",
+          "text": "CMake is two commands, always in this order:\n\n1. **Configure** — `cmake -S cpp -B cpp/build` reads `CMakeLists.txt`, finds a compiler, and writes build files into `cpp/build`.\n2. **Build** — `cmake --build cpp/build` runs that generated build system.\n\n`cpp/build/` is disposable. Everything in it is derived; deleting it costs you a rebuild and nothing else. That is why it is gitignored, and why \"delete the build directory and configure again\" is the correct first move when a build behaves impossibly.\n\n`CMakeLists.txt` declares three targets: the library `dut_core`, the executable `dut`, and the test binary `dut_tests` — then registers each test case with `add_test`, which is what `ctest` runs.",
+          "more": "Targets, not files, are the unit CMake reasons about. `target_link_libraries(dut PRIVATE dut_core)` says the executable needs the library; `target_include_directories(dut_core PUBLIC include)` says that anything linking dut_core also inherits its include path — which is why `dut_tests` can `#include \"dut/protocol.hpp\"` without repeating a single path.\n\nPRIVATE vs PUBLIC is the whole idea: PRIVATE is an implementation detail, PUBLIC propagates to consumers. Getting that wrong does not break your build — it breaks the build of whoever depends on you, later, which is the expensive kind of wrong.\n\n`CMAKE_BUILD_TYPE` selects the flag set. This project defaults to Debug because the debugging module needs symbols; a release build (`-DCMAKE_BUILD_TYPE=Release`) optimises and inlines, and inlined frames are exactly the ones missing from a backtrace when you need them most.\n\n**Single-config vs multi-config generators** — the difference that bites first. Ninja and Makefiles are *single-config*: the build type is fixed at configure time by `CMAKE_BUILD_TYPE`. Visual Studio and Xcode are *multi-config*: one configure produces all of Debug/Release, and you choose per command — `cmake --build cpp/build --config Debug`, and crucially `ctest -C Debug`. Omit `-C` on a multi-config build and CTest cannot tell which binaries you meant, so every test reports `Not Run` rather than failing honestly. `-C Debug` is accepted and ignored by single-config generators, which is why every ctest command in this project carries it: one command line that works on both."
+        },
+        {
+          "type": "predict",
+          "id": "predict",
+          "question": "You edit cpp/src/protocol.cpp and run `cmake --build cpp/build`. What gets recompiled?",
+          "options": [
+            "Every .cpp in the project — C++ has no incremental build",
+            "Only protocol.cpp, then dut_core, dut and dut_tests are relinked",
+            "Nothing until you re-run the configure step",
+            "Only protocol.cpp; the executables keep their old code until you delete cpp/build"
+          ],
+          "answer_index": 1,
+          "reveal": "The generated build system tracks per-object dependencies: one translation unit changed, so one object is rebuilt, and everything that links it is relinked. Editing a *header* is the expensive case — every translation unit that includes it is out of date."
+        },
+        {
+          "type": "do",
+          "id": "do",
+          "instructions": "Run the full native cycle, then break it on purpose:\n\n```cmake -S cpp -B cpp/build\ncmake --build cpp/build\nctest --test-dir cpp/build -C Debug --output-on-failure\n```\n\nAll seven tests should pass. If you drop the `-C Debug` and CMake chose a multi-config generator (Visual Studio), every test reports `Not Run — Test not available without configuration`; that is the generator difference in the expandable note, not a broken build.\n\nNow look at what the build produced — `cpp/build/bin/` holds `dut` and `dut_tests`; `cpp/build/CMakeCache.txt` records the compiler and generator CMake chose. Find the `CMAKE_GENERATOR` line and see which one you got.\n\nNext, cause a real compile error and read it. In `cpp/src/protocol.cpp`, delete the semicolon at the end of any statement inside `build_response`, rebuild, and read the message: file, line, column, and what the compiler expected. Then put it back and rebuild to green.\n\nFinally run one CTest case by name and watch it fail-fast:\n\n```ctest --test-dir cpp/build -C Debug -R protocol.invalid_json --output-on-failure\n```",
+          "command": "ctest --test-dir cpp/build -C Debug --output-on-failure"
+        },
+        {
+          "type": "verify",
+          "id": "verify-ctest",
+          "validator": "toolchain_check",
+          "mandatory": true,
+          "description": "Runs the whole CTest suite and requires every registered case to pass — including the protocol cases that encode REQ-COM-001, REQ-PROTO-001 and REQ-PROTO-002 in C++.",
+          "args": {
+            "tool": "ctest",
+            "args": ["--test-dir", "cpp/build", "-C", "Debug", "--output-on-failure"],
+            "expect_exit": 0,
+            "expect_output_regex": "100% tests passed",
+            "forbid_output_regex": "(?i)tests? failed",
+            "timeout_seconds": 120,
+            "success_note": "CTest ran every registered case and all passed — the same requirement checks the Python suite makes, enforced at the native level."
+          }
+        },
+        {
+          "type": "verify",
+          "id": "verify-selective",
+          "validator": "toolchain_check",
+          "mandatory": true,
+          "description": "Runs a single CTest case by regex, proving selective execution works and that the build in cpp/build is current.",
+          "args": {
+            "tool": "ctest",
+            "args": ["--test-dir", "cpp/build", "-C", "Debug", "-R", "protocol.invalid_json", "--output-on-failure"],
+            "expect_exit": 0,
+            "expect_output_regex": "1 test.*passed|100% tests passed",
+            "timeout_seconds": 60,
+            "success_note": "One named case ran on its own — the CTest equivalent of passing a pytest node id."
+          }
+        },
+        {
+          "type": "explain",
+          "id": "explain",
+          "question": "A colleague reports that their build fails with an error in a file they never touched, and it started right after they switched branches. Why is 'delete cpp/build and configure again' a reasonable first move, and what does it cost?",
+          "keywords": ["cache", "stale", "generated", "derived", "rebuild", "configure"],
+          "sample_answer": "Everything under cpp/build is derived, including CMakeCache.txt, which pins the compiler and options chosen at configure time. A branch switch can leave that cache describing a different source tree, so deleting it removes stale state rather than debugging it. The only cost is a full reconfigure plus rebuild — no source is at risk, because nothing in the build directory is source."
+        }
+      ],
+      "hints": [
+        { "level": 1, "text": "Configure once, build many times. If a command complains about missing build files, you skipped the configure step." },
+        { "level": 2, "text": "ctest must be told where the build tree is: `--test-dir cpp/build`. Without it, ctest looks in the current directory and reports 'No tests were found'. If every test says `Not Run — Test not available without configuration`, add `-C Debug`." },
+        { "level": 3, "text": "To see what CTest would run without running it: `ctest --test-dir cpp/build -N`. That lists the case names registered by add_test in CMakeLists.txt." },
+        { "level": 4, "text": "If the configure step cannot find a compiler on Windows, pass one explicitly: `cmake -S cpp -B cpp/build -DCMAKE_CXX_COMPILER=C:/dev/mingw64/bin/g++.exe`." }
+      ]
+    },
+    {
+      "id": "d11-harness-either-dut",
+      "title": "One harness, two DUTs",
+      "objective": "Point the existing pytest harness at the native DUT with --dut cpp, and understand why the tests needed no changes to work against a different implementation.",
+      "estimated_minutes": 14,
+      "status": "available",
+      "requires": ["cpp-build"],
+      "concepts": ["cpp-integration", "pytest", "hwil-reasoning"],
+      "prerequisites": ["d11-cmake-ctest"],
+      "source_files": ["tests/conftest.py", "tests/test_cpp_dut.py"],
+      "requirements": ["REQ-CPP-001"],
+      "blocks": [
+        {
+          "type": "learn",
+          "id": "learn",
+          "text": "The harness now takes an option:\n\n```pytest --dut cpp\n```\n\nEverything else is unchanged. `tests/test_status.py` and `tests/test_protocol.py` do not know which implementation answered them, because the only implementation-specific code in the whole suite is `dut_command()` in `conftest.py` — the argv that starts the process.\n\nThat is the payoff of testing **at the interface**. The tests assert on protocol behaviour, not on Python internals, so a rewrite in another language is a configuration change rather than a test rewrite.\n\nThis is exactly the simulated-DUT / real-DUT split you meet in a lab: same stimulus, same expectations, different thing under test.",
+          "more": "Look at what would have broken this. If a test had imported `simulator.simulator` and called `build_response()` directly, it would be testing the Python implementation, not the protocol — useful as a unit test, useless for parity. If a test had asserted on the exact Python dict ordering, or on a log line only the Python logger emits, the C++ DUT would fail for reasons that have nothing to do with correctness.\n\n`tests/test_cpp_dut.py` goes one step further than \"both pass\": it sends the same bytes to both DUTs in the same test run and compares the **raw reply lines**. Decoding both to dicts and comparing those would pass even if one emitted `{\"a\":1}` and the other `{\"a\": 1}` — a difference that matters the moment something diffs logs or a stricter client parses the stream.\n\nThe skip is deliberate too: on a machine with no compiler these tests skip rather than fail, because an unbuilt DUT is a missing capability, not a defect."
+        },
+        {
+          "type": "predict",
+          "id": "predict",
+          "question": "You run `pytest --dut cpp` on a machine where cpp/build was never built. What happens?",
+          "options": [
+            "Every test fails with a connection error",
+            "The tests skip with a message telling you to build first",
+            "pytest falls back to the Python DUT silently",
+            "The run errors during collection"
+          ],
+          "answer_index": 1,
+          "reveal": "conftest.cpp_dut_path() returns None and the fixture calls pytest.skip with the build command. A skip says 'this machine cannot answer the question'; a failure would say 'the product is broken'. Reporting the second when you mean the first is how test suites lose their credibility."
+        },
+        {
+          "type": "do",
+          "id": "do",
+          "instructions": "Drive the same tests against both implementations and compare the reports:\n\n```pytest -v tests/test_status.py tests/test_protocol.py\npytest -v tests/test_status.py tests/test_protocol.py --dut cpp\n```\n\nThe test ids are identical; only the process behind the socket changed.\n\nNow look at how little made that possible — open `tests/conftest.py` and find `dut_command()`. Confirm for yourself that it is the *only* place the implementation is named, then check `tests/test_status.py` for any mention of Python, the simulator module, or an import of it (there is none).\n\nFinally, run the parity suite that compares both at once:\n\n```pytest -v tests/test_cpp_dut.py\n```",
+          "command": "pytest -v tests/test_status.py tests/test_protocol.py --dut cpp"
+        },
+        {
+          "type": "verify",
+          "id": "verify-either",
+          "validator": "pytest_check",
+          "mandatory": true,
+          "description": "Runs the requirement-linked protocol and status tests against the C++ DUT — the same node ids you have been running all along.",
+          "args": {
+            "nodeids": ["tests/test_status.py", "tests/test_protocol.py"],
+            "pytest_args": ["--dut", "cpp"],
+            "expect": "pass",
+            "junit_contains": ["test_status_request_returns_ready"],
+            "timeout_seconds": 180,
+            "success_note": "The unchanged requirement tests passed against the native DUT. The harness is implementation-agnostic in fact, not just in intention."
+          }
+        },
+        {
+          "type": "quiz",
+          "id": "quiz",
+          "question": "Which of these test styles would have blocked the switch to a C++ DUT?",
+          "options": [
+            "Connecting to host/port and asserting on the JSON response",
+            "Importing simulator.simulator and calling build_response() directly in the test",
+            "Asserting that a status response arrives within 250 ms",
+            "Reading the DUT log file for a dut_ready line"
+          ],
+          "answer_index": 1,
+          "explanation": "Calling the Python function directly tests one implementation, not the protocol — there is no C++ equivalent to import. The other three describe externally observable behaviour that any conforming implementation must exhibit, which is why they survived the swap untouched. (Direct unit tests are still valuable — that is what cpp/tests and a pure-function test do — but they cannot double as parity tests.)"
+        },
+        {
+          "type": "explain",
+          "id": "explain",
+          "question": "In a hardware lab you would run the same suite against a simulator and against real hardware. Which parts of a result would you trust equally from both, and which would you not?",
+          "keywords": ["timing", "hardware", "simulat", "real", "protocol", "trust"],
+          "sample_answer": "Protocol and logic results transfer well: a malformed message rejected by the simulator should be rejected by the hardware, and a wrong error code is a real defect either way. Timing does not transfer — the simulator's 250 ms margin says nothing about bus latency, scheduling jitter, or I/O on the real device, so a passing timing test against a simulator is evidence about the harness, not about the hardware."
+        }
+      ],
+      "hints": [
+        { "level": 1, "text": "The tests do not import the DUT. Ask yourself what they *do* depend on — a host, a port, and a protocol." },
+        { "level": 2, "text": "conftest.py::dut_command is the switch; the dut fixture calls it with whatever --dut selected, and everything downstream sees only a RunningDut." },
+        { "level": 3, "text": "Environment variable FTL_DUT=cpp does the same thing as --dut cpp, which is how CI can run the whole suite twice without editing any command line." }
+      ]
+    }
+  ]
+}

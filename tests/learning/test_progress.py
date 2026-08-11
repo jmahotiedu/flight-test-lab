@@ -1,0 +1,128 @@
+"""Progress-store tests: persistence, atomicity, corruption, completion gating."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+from learning.server.curriculum import load_curriculum
+from learning.server.progress import ProgressStore
+from learning.server.validators import validator_names
+
+LEARNING_ROOT = Path(__file__).resolve().parents[2] / "learning"
+
+
+def _lesson(lesson_id: str = "d1-import-no-side-effects"):
+    curriculum = load_curriculum(LEARNING_ROOT, validator_names())
+    return curriculum.lessons[lesson_id]
+
+
+def test_progress_round_trip(tmp_path: Path) -> None:
+    path = tmp_path / "progress.json"
+    store = ProgressStore(path)
+    store.mark_started("d1-import-no-side-effects")
+    store.record_validation("d1-import-no-side-effects", "verify", True)
+    store.record_hint("d1-import-no-side-effects")
+
+    reloaded = ProgressStore(path)
+    snapshot = reloaded.snapshot()
+    record = snapshot["lessons"]["d1-import-no-side-effects"]
+    assert record["status"] == "in_progress"
+    assert record["validations"]["verify"]["passed"] is True
+    assert record["hints_used"] == 1
+    assert snapshot["last_lesson_id"] == "d1-import-no-side-effects"
+
+
+def test_corrupt_progress_is_backed_up_and_reset(tmp_path: Path) -> None:
+    path = tmp_path / "progress.json"
+    path.write_text("{not json", encoding="utf-8")
+    store = ProgressStore(path)
+    assert store.snapshot()["lessons"] == {}
+    assert (tmp_path / "progress.corrupt.json").exists()
+
+
+def test_completion_requires_mandatory_validation(tmp_path: Path) -> None:
+    store = ProgressStore(tmp_path / "progress.json")
+    lesson = _lesson()
+    store.mark_started(lesson.id)
+    complete, missing = store.mark_complete(lesson)
+    assert not complete
+    assert any("validation" in item for item in missing)
+
+
+def test_completion_requires_quiz_and_explain(tmp_path: Path) -> None:
+    store = ProgressStore(tmp_path / "progress.json")
+    lesson = _lesson("d1-argparse-logging")  # has quiz AND explain AND validator
+    store.mark_started(lesson.id)
+    for block in lesson.mandatory_validators():
+        store.record_validation(lesson.id, block["id"], True)
+    complete, missing = store.mark_complete(lesson)
+    assert not complete
+    assert any("quiz" in item for item in missing)
+    assert any("explain" in item for item in missing)
+
+
+def test_failed_validation_blocks_completion(tmp_path: Path) -> None:
+    store = ProgressStore(tmp_path / "progress.json")
+    lesson = _lesson()
+    store.record_validation(lesson.id, "verify", False)
+    store.record_explain(lesson.id, "explain", True, lesson.concepts)
+    complete, missing = store.mark_complete(lesson)
+    assert not complete
+    assert any("validation" in item for item in missing)
+
+
+def test_full_completion_flow(tmp_path: Path) -> None:
+    store = ProgressStore(tmp_path / "progress.json")
+    lesson = _lesson()
+    store.mark_started(lesson.id)
+    store.record_validation(lesson.id, "verify", True)
+    store.record_explain(lesson.id, "explain", True, lesson.concepts)
+    complete, missing = store.mark_complete(lesson)
+    assert complete, missing
+    assert store.lesson_status(lesson) == "complete"
+
+
+def test_resume_skips_completed_and_unavailable(tmp_path: Path) -> None:
+    curriculum = load_curriculum(LEARNING_ROOT, validator_names())
+    store = ProgressStore(tmp_path / "progress.json")
+    first = curriculum.lessons[curriculum.ordered_lesson_ids[0]]
+    store.mark_started(first.id)
+    store.record_validation(first.id, "verify", True)
+    store.record_explain(first.id, "explain", True, first.concepts)
+    store.mark_complete(first)
+
+    resume = store.resume_lesson_id(curriculum)
+    assert resume == curriculum.ordered_lesson_ids[1]
+    assert curriculum.lessons[resume].status == "available"
+
+
+def test_concept_mastery_tracks_weakness(tmp_path: Path) -> None:
+    store = ProgressStore(tmp_path / "progress.json")
+    store.record_quiz("l1", "q1", True, ("timing",))
+    store.record_quiz("l1", "q2", False, ("timing",))
+    store.record_quiz("l1", "q3", False, ("timing",))
+    mastery = store.concept_mastery(("timing", "networking"))
+    assert mastery["timing"]["correct"] == 1
+    assert mastery["timing"]["incorrect"] == 2
+    assert mastery["timing"]["weak"] is True
+    assert mastery["networking"]["score"] is None
+
+
+def test_interview_weights_prefer_weak_concepts(tmp_path: Path) -> None:
+    store = ProgressStore(tmp_path / "progress.json")
+    store.record_quiz("l1", "q1", False, ("timing",))
+    store.record_interview("iq-strong", True)
+    weights = store.interview_weights(
+        {"iq-weak": ("timing",), "iq-strong": ("logging",)}
+    )
+    assert weights["iq-weak"] > weights["iq-strong"]
+
+
+def test_progress_file_is_written_atomically(tmp_path: Path) -> None:
+    path = tmp_path / "progress.json"
+    store = ProgressStore(path)
+    store.mark_started("x")
+    assert not (tmp_path / "progress.tmp").exists()
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert data["lessons"]["x"]["status"] == "in_progress"

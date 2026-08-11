@@ -1,0 +1,203 @@
+{
+  "lessons": [
+    {
+      "id": "d14-capstone",
+      "title": "Capstone: diagnose a failing requirements check end to end",
+      "objective": "Run the full diagnosis loop on a red check — evidence, classification, targeted experiment, root cause — without being told the answer.",
+      "estimated_minutes": 25,
+      "status": "available",
+      "concepts": [
+        "failure-diagnosis",
+        "timing",
+        "requirements-evidence"
+      ],
+      "prerequisites": [
+        "d13-sim-vs-hwil-gap"
+      ],
+      "source_files": [
+        "simulator/simulator.py",
+        "requirements/software_requirements.csv"
+      ],
+      "requirements": [
+        "REQ-COM-002"
+      ],
+      "blocks": [
+        {
+          "type": "learn",
+          "id": "learn",
+          "text": "A requirements check just went red. Resist the urge to fix anything. The loop is always the same:\n\n1. **Inspect the evidence** — transcript, DUT log, JUnit — before forming any theory.\n2. **Classify** the failure: product defect, test defect, fault configuration, or infrastructure.\n3. **Hypothesize** one root cause that explains *all* the evidence.\n4. Run a **targeted check** that would falsify that hypothesis.\n5. State the **root cause and fix recommendation** with the evidence chain attached.\n\nThe answer below is not revealed until you work the loop yourself.",
+          "more": "The discipline is order of operations. Each step prunes the hypothesis space before the next piece of evidence is gathered, which is what keeps diagnosis cheaper than guessing. Classification matters because it routes the fix: a product defect goes to the DUT author, a test defect to the test author, a fault configuration to whoever set the run up, infrastructure to the bench owner. The targeted check (step 4) is the scientific core: it changes exactly one variable. If two variables change between the red run and the green run, you have learned nothing — a green re-run with the fault flag still present would have indicted the test or the timing budget, not the fault injection. This is also the interview answer: 'what do you do when a test fails?' is asking for this loop, in this order, with evidence cited at each step."
+        },
+        {
+          "type": "do",
+          "id": "do-symptom",
+          "instructions": "Run check **v-symptom** below. It is **expected to go RED** — that red run is your evidence, not a mistake.\n\nWhen it completes, study two things in the result:\n\n- The **transcript**: find the elapsed milliseconds on the response line and compare it against REQ-COM-002 in `requirements/software_requirements.csv` (the 250 ms status budget).\n- The **DUT log expectation**: the check looked for a `fault_injected` line.\n\nDo not change any code. Write down (on paper counts) which failure class you suspect and why before moving on."
+        },
+        {
+          "type": "verify",
+          "id": "v-symptom",
+          "validator": "behavior_probe",
+          "mandatory": false,
+          "expect_failure": true,
+          "description": "EXPECTED TO GO RED. The DUT is launched with an injected fault: --fault delayed_response --fault-delay-ms 400, which delays every response by 400 ms — over the 250 ms REQ-COM-002 budget. Run it, then read the red transcript: the response line shows ~400 ms elapsed against the 250 ms budget, and the DUT log expectation (fault_injected) tells you the delay was configured, not organic. This failing run is the symptom evidence for your diagnosis.",
+          "args": {
+            "dut_args": [
+              "--fault",
+              "delayed_response",
+              "--fault-delay-ms",
+              "400"
+            ],
+            "steps": [
+              {
+                "send": {
+                  "command": "status",
+                  "sequence": 1
+                },
+                "expect": {
+                  "state": "READY"
+                },
+                "max_elapsed_ms": 250
+              }
+            ],
+            "log_expect_regex": "fault_injected"
+          }
+        },
+        {
+          "type": "quiz",
+          "id": "quiz-classify",
+          "question": "Based on the v-symptom transcript and the DUT log, which failure class is this?",
+          "options": [
+            "Product defect — the DUT's status handler is genuinely too slow",
+            "Test defect — the 250 ms budget in REQ-COM-002 is unrealistic",
+            "Injected-fault configuration — a run-time flag changed the DUT's timing",
+            "Infrastructure — the loopback network or host introduced the latency"
+          ],
+          "answer_index": 2,
+          "explanation": "The DUT logic is intact: the response payload is correct, only the timing moved, and the log's fault_injected line names the mechanism. A --fault flag was passed at launch, so the delay is a configuration of this run, not a property of the product, the test, or the bench. That classification decides the targeted check: re-run with exactly one variable removed — the fault flag."
+        },
+        {
+          "type": "do",
+          "id": "do-clean",
+          "instructions": "Name and run the targeted check that proves your classification: **the same status request, same 250 ms budget, but no `--fault` arguments.**\n\nCheck **v-clean** below is exactly that. One variable changed (fault injection off); everything else identical.\n\nPredict before you run it: if the root cause really is the fault configuration, what must the elapsed time be? If v-clean were ALSO red, what would that have told you instead?"
+        },
+        {
+          "type": "verify",
+          "id": "v-clean",
+          "validator": "behavior_probe",
+          "mandatory": true,
+          "description": "The control run: identical status request and 250 ms budget, DUT launched with no fault arguments. Green here proves the 400 ms delay came from the fault configuration and not from the DUT, the test, or the environment.",
+          "args": {
+            "steps": [
+              {
+                "send": {
+                  "command": "status",
+                  "sequence": 1
+                },
+                "expect": {
+                  "state": "READY"
+                },
+                "max_elapsed_ms": 250
+              }
+            ],
+            "success_note": "Clean run is well inside the 250 ms budget. Combined with the red fault-injected run and the fault_injected log line, the root cause is proven: the --fault delayed_response configuration, not the DUT."
+          }
+        },
+        {
+          "type": "explain",
+          "id": "explain",
+          "question": "State the root cause and the evidence chain in two sentences, as you would in a test-readiness review.",
+          "keywords": [
+            "fault",
+            "400",
+            "config"
+          ],
+          "sample_answer": "The root cause is the injected-fault configuration: the DUT was launched with --fault delayed_response --fault-delay-ms 400, so every status response took ~400 ms and breached the 250 ms REQ-COM-002 budget. The evidence chain is the fault_injected line in the DUT log, the ~400 ms elapsed in the red transcript, and the clean re-run without the fault flags passing well under budget — one variable changed, symptom gone."
+        }
+      ],
+      "hints": [
+        {
+          "level": 1,
+          "text": "Compare the elapsed_ms on the transcript's response line against REQ-COM-002's 250 ms budget before theorizing about anything else."
+        },
+        {
+          "level": 2,
+          "text": "Read the DUT log line the check looked for: fault_injected. What launched the DUT in this state, and does the DUT code contain any delay of its own?"
+        },
+        {
+          "level": 3,
+          "text": "Re-run the same status request without --fault. That single-variable experiment is the targeted check — v-clean does exactly this."
+        },
+        {
+          "level": 4,
+          "text": "Root cause: the DUT was launched with --fault delayed_response --fault-delay-ms 400, an injected-fault configuration that delayed the status response to ~400 ms, over the 250 ms REQ-COM-002 budget. Evidence: fault_injected in the DUT log, ~400 ms in the red v-symptom transcript, and v-clean (no fault flags) passing under budget. Fix recommendation: remove the fault flags from the run configuration; no DUT or test change needed."
+        }
+      ]
+    },
+    {
+      "id": "d14-interview-drill",
+      "title": "Interview mode: train your weak concepts",
+      "objective": "Use interview mode the way it is designed — as a weighted drill that resurfaces the concepts you miss — and articulate one weak concept fluently.",
+      "estimated_minutes": 20,
+      "status": "available",
+      "concepts": [
+        "failure-diagnosis"
+      ],
+      "prerequisites": [
+        "d14-capstone"
+      ],
+      "source_files": [
+        "learning/curriculum/interview.json"
+      ],
+      "requirements": [],
+      "blocks": [
+        {
+          "type": "learn",
+          "id": "learn",
+          "text": "Interview mode is not a random quiz deck. Every answer you give updates a per-concept record, and questions are **weighted toward concepts you have missed** — a question you fumble is more likely to come back later, rephrased, until you answer it cleanly.\n\nThat is deliberate: interviews probe exactly the topics you are weakest on, so the drill spends your time there too. Your job in this lesson is to find out what the system currently thinks your weak concepts are — and fix one of them.",
+          "more": "The weighting is the same idea as spaced repetition: items you miss get scheduled sooner and more often; items you answer confidently fade back. The concept weights are seeded by everything you have done in the curriculum — quiz misses, weak explain answers, failed checks all feed the same per-concept record — so interview mode on day 14 already knows your history. The practical consequence: do not skim a question because it looks familiar from a lesson you passed. If the system resurfaced it, some earlier answer marked that concept weak, and familiarity is not the same as being able to produce the answer under time pressure, out loud, in your own words. That production ability is the actual interview skill being drilled."
+        },
+        {
+          "type": "do",
+          "id": "do-interview",
+          "instructions": "Open the **Interview** tab in the learning UI and answer **at least 5 questions**, out loud or in writing — no looking at sample answers first.\n\nAs you go, keep a tally:\n\n- Which questions did you miss or stumble on?\n- Which **concepts** does the UI mark weak for you afterward?\n- Did any question (or its concept) come back within your 5?\n\nYou will need your weakest concept for the explain block below."
+        },
+        {
+          "type": "quiz",
+          "id": "quiz",
+          "question": "A question you missed earlier comes back later in interview mode. Why?",
+          "options": [
+            "The deck is shuffled randomly, so repeats are coincidence",
+            "Interview mode weights selection toward concepts you have missed, so weak concepts resurface until you answer them well",
+            "There are fewer questions than interview sessions, so repeats are unavoidable",
+            "It is a bug — answered questions should be removed from the deck"
+          ],
+          "answer_index": 1,
+          "explanation": "Selection is weighted by your per-concept record: a miss raises that concept's weight, so its questions are drawn again sooner. That is the feature — the drill concentrates your limited practice time on exactly the concepts an interviewer would expose."
+        },
+        {
+          "type": "explain",
+          "id": "explain",
+          "question": "Pick the concept interview mode marks as your weakest, and summarize its key idea in your own words — the version you could say out loud in an interview.",
+          "keywords": [
+            "concept"
+          ],
+          "sample_answer": "My weakest concept is failure-diagnosis. The key idea is that a failing check is evidence, not a verdict: you inspect the transcript and logs first, classify the failure as product, test, configuration, or infrastructure, then run a one-variable targeted check to confirm the root cause before recommending any fix."
+        }
+      ],
+      "hints": [
+        {
+          "level": 1,
+          "text": "The weak-concept marks come from your own history — quiz misses and thin explain answers across all fourteen days, not just this lesson."
+        },
+        {
+          "level": 2,
+          "text": "If a concept resurfaced in your 5 questions, that is the weighting working; start your summary with that concept."
+        },
+        {
+          "level": 3,
+          "text": "Shape the summary as: 'The concept is X. The key idea is Y. The mistake people make is Z.' Three sentences is enough if all three are true."
+        }
+      ]
+    }
+  ]
+}

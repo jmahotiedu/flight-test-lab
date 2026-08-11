@@ -1,0 +1,223 @@
+{
+  "lessons": [
+    {
+      "id": "d9-threaded-server",
+      "title": "ThreadingTCPServer: one handler thread per connection",
+      "objective": "Explain how the DUT serves concurrent clients, and prove it by hammering it from threads.",
+      "estimated_minutes": 12,
+      "status": "available",
+      "concepts": ["concurrency", "networking"],
+      "prerequisites": ["d8-config-driven-faults"],
+      "source_files": ["simulator/simulator.py"],
+      "flow": "simulator_execution",
+      "requirements": [],
+      "blocks": [
+        {
+          "type": "learn",
+          "id": "learn",
+          "text": "`ThreadingDutServer` subclasses `socketserver.ThreadingTCPServer`: the main thread runs the accept loop, and **each accepted connection gets its own handler thread** running `DutRequestHandler.handle()` until that client disconnects.\n\n`daemon_threads = True` means handler threads are daemons — they die with the process instead of blocking shutdown.\n\nThe consequence for a test harness: a slow or silent client does not make every other client queue behind it. Each connection has its own thread and its own read loop.",
+          "more": "The accept loop lives in `serve_forever()` on the main thread; `process_request()` spawns a `threading.Thread` per connection. Without `daemon_threads = True`, `server_close()` would wait on every live handler thread — a hung client could hang your shutdown. Threads overlap here because handler work is I/O-bound: the GIL is released on socket reads and writes, so one thread blocked in `readline()` does not starve the others. Threads are the wrong tool for CPU-bound work (the GIL serializes bytecode); they are the right tool for many simultaneous connections. The pytest fixture leans on exactly this: the suite can hold one client open while your probe opens another."
+        },
+        {
+          "type": "predict",
+          "id": "predict",
+          "question": "Client A connects to the DUT and then goes silent without sending anything. What happens to client B's requests?",
+          "options": [
+            "B waits until A disconnects or sends",
+            "B is served normally in its own handler thread",
+            "The server rejects B: one client at a time",
+            "B's requests are buffered until A's connection closes"
+          ],
+          "answer_index": 1,
+          "reveal": "A's handler thread is blocked in readline() — its own thread, its own problem. B's connection was accepted by the main thread and handed to a fresh handler thread, so B's requests are answered immediately. The hammer below demonstrates this at scale."
+        },
+        {
+          "type": "do",
+          "id": "do",
+          "instructions": "Start the DUT with a log file in one terminal:\n\n```python -m simulator.simulator --port 9779 --log-file evidence/logs/threaded.log\n```\n\nIn a second terminal, save this as `hammer_status.py` in the repo root and run `.venv\\Scripts\\python hammer_status.py` — 8 threads, 20 status requests each, one LabClient per thread:\n\n```import threading\nfrom testlab.client import LabClient\n\ndef hammer():\n    with LabClient('127.0.0.1', 9779) as client:\n        for i in range(20):\n            client.request({'command': 'status', 'sequence': i + 1})\n\nthreads = [threading.Thread(target=hammer) for _ in range(8)]\nfor t in threads:\n    t.start()\nfor t in threads:\n    t.join()\nprint('done')\n```\n\nStop the DUT (Ctrl+C), then open `evidence/logs/threaded.log`: the `request peer=127.0.0.1:<port>` lines come from **eight different client ports, interleaved**. That interleaving is the concurrency, recorded as evidence.",
+          "command": "python -m simulator.simulator --port 9779 --log-file evidence/logs/threaded.log"
+        },
+        {
+          "type": "verify",
+          "id": "verify",
+          "validator": "python_probe",
+          "mandatory": true,
+          "description": "Launches the real DUT in a subprocess, hammers it from 8 threads x 20 status requests (one LabClient per thread), and checks that all 160 responses come back READY.",
+          "args": {
+            "snippet": "import socket, subprocess, sys, threading, time\nfrom testlab.client import LabClient\nprobe = socket.socket()\nprobe.bind(('127.0.0.1', 0))\nport = probe.getsockname()[1]\nprobe.close()\nproc = subprocess.Popen([sys.executable, '-m', 'simulator.simulator', '--port', str(port)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\nresults = []\ndef hammer():\n    with LabClient('127.0.0.1', port) as client:\n        for i in range(20):\n            reply = client.request({'command': 'status', 'sequence': i + 1})\n            results.append(reply.payload.get('state'))\ntry:\n    deadline = time.monotonic() + 5.0\n    while True:\n        try:\n            with socket.create_connection(('127.0.0.1', port), timeout=0.2):\n                break\n        except OSError:\n            if time.monotonic() > deadline:\n                raise\n            time.sleep(0.05)\n    threads = [threading.Thread(target=hammer) for _ in range(8)]\n    for t in threads:\n        t.start()\n    for t in threads:\n        t.join()\n    total = sum(1 for state in results if state == 'READY')\n    print('ok', total)\nfinally:\n    proc.terminate()\n    proc.wait(timeout=5)",
+            "expect_stdout_regex": "ok 160",
+            "timeout_seconds": 30,
+            "success_note": "160/160 READY responses from 8 concurrent client threads — the threading server absorbed the whole load, and the DUT process was terminated cleanly in finally."
+          }
+        },
+        {
+          "type": "explain",
+          "id": "explain",
+          "question": "In your own words: why don't concurrent clients queue behind a slow client on this server?",
+          "keywords": ["thread", "handler", "connection"],
+          "sample_answer": "ThreadingTCPServer spawns one handler thread per accepted connection, so each client's read-process-respond loop runs independently. A slow client only blocks its own handler thread; the accept loop and every other connection's handler keep running."
+        }
+      ],
+      "hints": [
+        { "level": 1, "text": "Which thread accepts connections, and which thread runs handle() for a given client? They are not the same." },
+        { "level": 2, "text": "Read ThreadingDutServer and DutRequestHandler in simulator/simulator.py — the class attributes daemon_threads and allow_reuse_address, and the per-connection while loop." },
+        { "level": 3, "text": "If the hammer hangs: confirm the DUT is actually up (netstat -ano | findstr 9779), that you used one LabClient PER thread (a shared client is not thread-safe), and that every thread is joined before you read the results." }
+      ]
+    },
+    {
+      "id": "d9-shared-state-race",
+      "title": "Shared state, races, and the lock",
+      "objective": "Add a stateful counter command to the DUT, watch concurrent increments lose updates without a lock, then make it deterministic with threading.Lock.",
+      "estimated_minutes": 18,
+      "status": "available",
+      "concepts": ["concurrency"],
+      "prerequisites": ["d9-threaded-server"],
+      "source_files": ["simulator/simulator.py"],
+      "requirements": [],
+      "blocks": [
+        {
+          "type": "learn",
+          "id": "learn",
+          "text": "Every handler thread calls the same `build_response()`, so any module-global it touches is **shared state**. `_counter += 1` is not one operation — it is read, add, store. The GIL can switch threads between those steps: two threads read the same value, both store value+1, and one increment is silently lost.\n\nThe fix is `threading.Lock()`: wrap the whole read-modify-write so exactly one thread is in the critical section at a time. The lock serializes the *sequence*, not the integer.",
+          "more": "The GIL makes individual bytecode operations atomic, but `_counter += 1` is several bytecodes (load, add, store), and a thread switch can land between any two of them. Between increments each thread does network I/O, so scheduling is nondeterministic — which is why the unlocked version loses updates unpredictably and can even pass on a quiet machine: on fast loopback the window is a few hundred nanoseconds wide, so a switch almost never lands inside it. That is exactly why a passing unlocked run proves nothing — the race is there, just unexercised. The exercise below forces the issue by writing the three steps out explicitly and putting `time.sleep(0)` (a thread yield) between read and store: a microscope that widens the window on demand, not part of the fix. Keep the real critical section minimal: only the read-modify-write goes inside the lock, never I/O. Same discipline as a flight-test bench: any shared resource (a power supply, an ARINC bus) needs an owner or a lock, and 'it worked last run' is not evidence of safety."
+        },
+        {
+          "type": "predict",
+          "id": "predict",
+          "question": "10 threads each send 50 counter requests through separate connections to an UNLOCKED counter. What does the final count read?",
+          "options": [
+            "Exactly 500 — the GIL makes += atomic",
+            "Usually less than 500 — increments are lost to interleaving",
+            "More than 500 — threads double-count",
+            "The server crashes on the first concurrent increment"
+          ],
+          "answer_index": 1,
+          "reveal": "Read-modify-write interleaving drops increments: two threads read the same _counter and both write value+1. The total is nondeterministic — usually under 500, occasionally (on a quiet machine) exactly 500, which is precisely why a single passing run is not proof of correctness."
+        },
+        {
+          "type": "do",
+          "id": "do",
+          "instructions": "Edit `simulator/simulator.py`. Add a module global near `LOGGER`:\n\n```_counter = 0\n```\n\nand a new branch in `build_response()`, BEFORE the UNSUPPORTED_COMMAND fallthrough — first WITHOUT any lock. Write the increment as three explicit steps (that is what `+=` compiles to anyway), with `time.sleep(0)` between read and store — it forces a thread yield so the interleaving shows on demand instead of by luck. `import time` at the top of the file:\n\n```    if command == \"counter\":\n        global _counter\n        current = _counter\n        time.sleep(0)  # yield: widens the race window so you can SEE it\n        _counter = current + 1\n        return {\"status\": \"ok\", \"count\": _counter, \"sequence\": sequence}\n```\n\nNow run the concurrent hammer (exact script in hint 3 — save it as `counter_hammer.py` in the repo root and run `.venv\\Scripts\\python counter_hammer.py`). It fires 10 threads x 50 counter requests, then reads the count back. Run it a few times: the final number should be 500 and will not be — expect something like 350-490, different every run. Those missing increments are the lost updates.\n\nThen add the lock: `_counter_lock = threading.Lock()` next to `_counter` (`threading` is already imported), and wrap the whole read-modify-write, yield included:\n\n```    if command == \"counter\":\n        global _counter\n        with _counter_lock:\n            current = _counter\n            time.sleep(0)\n            _counter = current + 1\n            count = _counter\n        return {\"status\": \"ok\", \"count\": count, \"sequence\": sequence}\n```\n\nRe-run the hammer: exactly 500, every run — the lock holds across the forced yield. Once you have seen it, delete the `time.sleep(0)` line: it was a microscope, not part of the fix. The lock is.",
+          "command": ".venv\\Scripts\\python counter_hammer.py"
+        },
+        {
+          "type": "verify",
+          "id": "v-behavior",
+          "validator": "behavior_probe",
+          "mandatory": true,
+          "description": "Starts a fresh DUT (counter at 0) and sends two counter requests over one connection, checking the count increments 1 then 2 — the single-threaded contract of your new command.",
+          "args": {
+            "wait_ready": true,
+            "steps": [
+              { "send": { "command": "counter", "sequence": 1 }, "expect": { "status": "ok", "count": 1 } },
+              { "send": { "command": "counter", "sequence": 2 }, "expect": { "count": 2 } }
+            ],
+            "success_note": "The counter command answers {status: ok, count: N} and increments per request — the sequential contract holds before we stress it."
+          }
+        },
+        {
+          "type": "verify",
+          "id": "v-concurrent",
+          "validator": "python_probe",
+          "mandatory": true,
+          "description": "Launches a fresh DUT process (counter starts at 0), fires 10 threads x 50 counter requests through separate connections, then sends one final counter request and prints its count minus 1. With the lock this passes deterministically at 500; without it, lost updates usually make it fall short.",
+          "args": {
+            "snippet": "import socket, subprocess, sys, threading, time\nfrom testlab.client import LabClient\nprobe = socket.socket()\nprobe.bind(('127.0.0.1', 0))\nport = probe.getsockname()[1]\nprobe.close()\nproc = subprocess.Popen([sys.executable, '-m', 'simulator.simulator', '--port', str(port)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\nerrors = []\ndef hammer():\n    try:\n        with LabClient('127.0.0.1', port) as client:\n            for i in range(50):\n                client.request({'command': 'counter', 'sequence': i + 1})\n    except Exception as exc:\n        errors.append(exc)\ntry:\n    deadline = time.monotonic() + 5.0\n    while True:\n        try:\n            with socket.create_connection(('127.0.0.1', port), timeout=0.2):\n                break\n        except OSError:\n            if time.monotonic() > deadline:\n                raise\n            time.sleep(0.05)\n    threads = [threading.Thread(target=hammer) for _ in range(10)]\n    for t in threads:\n        t.start()\n    for t in threads:\n        t.join()\n    assert not errors, errors\n    with LabClient('127.0.0.1', port) as client:\n        final = client.request({'command': 'counter', 'sequence': 501})\n    print('final', final.payload['count'] - 1)\nfinally:\n    proc.terminate()\n    proc.wait(timeout=5)",
+            "expect_stdout_regex": "final 500",
+            "timeout_seconds": 30,
+            "success_note": "500 increments from 10 racing threads, zero lost — the lock serialized every read-modify-write, and the result is deterministic across runs."
+          }
+        },
+        {
+          "type": "explain",
+          "id": "explain",
+          "question": "What exactly does the lock serialize, and why is the race in the read-modify-write sequence rather than in 'integer increment' itself?",
+          "keywords": ["lock", "read-modify-write", "interleav"],
+          "sample_answer": "The lock serializes the whole read-modify-write sequence so only one thread at a time reads _counter, adds 1, and stores it. There is no single 'integer increment' operation to make atomic: += is several bytecodes, and thread interleaving between them is what loses updates — two threads read the same value and both store value+1."
+        }
+      ],
+      "hints": [
+        { "level": 1, "text": "What state would two handler threads touch at the same time, and what are the individual steps inside _counter += 1?" },
+        { "level": 2, "text": "The counter branch goes in build_response() in simulator/simulator.py, before the UNSUPPORTED_COMMAND return. The global lives at module level next to LOGGER; threading is already imported at the top of the file." },
+        { "level": 3, "text": "The hammer script (save as counter_hammer.py at repo root, run with .venv\\Scripts\\python counter_hammer.py — it launches its own DUT):\n\n```import socket, subprocess, sys, threading, time\nfrom testlab.client import LabClient\n\nprobe = socket.socket()\nprobe.bind(('127.0.0.1', 0))\nport = probe.getsockname()[1]\nprobe.close()\nproc = subprocess.Popen([sys.executable, '-m', 'simulator.simulator', '--port', str(port)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n\ndef hammer():\n    with LabClient('127.0.0.1', port) as client:\n        for i in range(50):\n            client.request({'command': 'counter', 'sequence': i + 1})\n\ntry:\n    deadline = time.monotonic() + 5.0\n    while True:\n        try:\n            with socket.create_connection(('127.0.0.1', port), timeout=0.2):\n                break\n        except OSError:\n            if time.monotonic() > deadline:\n                raise\n            time.sleep(0.05)\n    threads = [threading.Thread(target=hammer) for _ in range(10)]\n    for t in threads:\n        t.start()\n    for t in threads:\n        t.join()\n    with LabClient('127.0.0.1', port) as client:\n        final = client.request({'command': 'counter', 'sequence': 501})\n    print('final', final.payload['count'] - 1)\nfinally:\n    proc.terminate()\n    proc.wait(timeout=5)\n```\n\n500 = no lost updates. Less = the race bit." },
+        { "level": 4, "text": "Full solution. Module level: `_counter = 0` and `_counter_lock = threading.Lock()` (plus `import time` for the demonstration yield). In build_response(), before the fallthrough:\n\n```    if command == \"counter\":\n        global _counter\n        with _counter_lock:\n            current = _counter\n            time.sleep(0)\n            _counter = current + 1\n            count = _counter\n        return {\"status\": \"ok\", \"count\": count, \"sequence\": sequence}\n```\n\nTwo details matter: `count = _counter` reads INSIDE the lock, so the count you return is the count you wrote; and the `time.sleep(0)` was only there to make the race visible — delete it once the hammer reads 500, and the lock alone keeps it deterministic." }
+      ]
+    },
+    {
+      "id": "d9-deterministic-timing",
+      "title": "Deterministic timing: the 250 ms deadline under concurrency",
+      "objective": "Treat REQ-COM-002's 250 ms assertion as a measurement problem: monotonic clocks, timing margins, and why flake means design, not bad luck.",
+      "estimated_minutes": 12,
+      "status": "available",
+      "concepts": ["timing", "concurrency", "failure-diagnosis"],
+      "prerequisites": ["d9-shared-state-race"],
+      "source_files": ["tests/test_status.py", "src/testlab/client.py", "requirements/software_requirements.csv"],
+      "requirements": ["REQ-COM-002"],
+      "blocks": [
+        {
+          "type": "learn",
+          "id": "learn",
+          "text": "REQ-COM-002: *the DUT shall respond to a valid status request within 250 milliseconds.* `LabClient.request()` measures that with `time.monotonic()` — a clock that never jumps backward, unlike the wall clock (`time.time()`), which NTP can step mid-measurement.\n\nA deadline test samples a **distribution**, not a constant: client scheduling, the handler thread, and OS jitter all add noise. A test failing 1 in 20 runs at 250 ms is telling you about the tail of that distribution. The response is margin chosen from measured data — or a faster system — never deleting the test.",
+          "more": "Wall-clock time exists to tell you what time it is; monotonic time exists to tell you how long something took. On a machine where NTP steps the clock backward during a test, time.time() can report a negative or absurd duration — monotonic is immune by contract. For margins, institutional practice is to measure the distribution first (50+ samples, min/median/max/p95), then set the assertion at a defensible point above the observed tail with headroom for slower CI machines — not to loosen it blindly. Here 250 ms against a measured sub-millisecond loopback median is enormous headroom, which is exactly why a failure at that line is a strong signal: something real changed (load, a fault argument, a genuine regression). Flake is data about variance, and variance has a cause."
+        },
+        {
+          "type": "predict",
+          "id": "predict",
+          "question": "Which clock belongs in a deadline assertion, and why?",
+          "options": [
+            "time.time() — it is the real-world time",
+            "time.monotonic() — it cannot jump backward when the wall clock is adjusted",
+            "datetime.now() — it has microsecond precision",
+            "Any of them — on loopback they are identical"
+          ],
+          "answer_index": 1,
+          "reveal": "time.monotonic() is guaranteed never to go backward and is unaffected by NTP steps or timezone changes. LabClient.request() uses it for elapsed_seconds — wall-clock adjustments mid-request cannot corrupt the measurement."
+        },
+        {
+          "type": "do",
+          "id": "do",
+          "instructions": "Measure the distribution before trusting any assertion about it. Start the DUT:\n\n```python -m simulator.simulator --port 9779\n```\n\nIn a second terminal, run this against it (50 samples, printed in milliseconds):\n\n```import statistics\nfrom testlab.client import LabClient\nwith LabClient('127.0.0.1', 9779) as c:\n    samples = [c.request({'command': 'status', 'sequence': i}).elapsed_seconds * 1000 for i in range(50)]\nprint('min %.2f median %.2f max %.2f ms' % (min(samples), statistics.median(samples), max(samples)))\n```\n\nCompare the max to the 250 ms requirement, then run the requirement's test and check its evidence:\n\n```.venv\\Scripts\\python -m pytest -v tests/test_status.py::test_status_response_meets_250_ms_deadline\n```\n\n(bash: `.venv/bin/python -m pytest ...`). Note how far the measured values sit below 250 ms — that gap is the margin, and it is why a failure at this assertion deserves investigation rather than a retry.",
+          "command": "python -m simulator.simulator --port 9779"
+        },
+        {
+          "type": "verify",
+          "id": "verify",
+          "validator": "pytest_check",
+          "mandatory": true,
+          "description": "Runs the REQ-COM-002 deadline test in the sandboxed evidence environment and confirms it passes and appears in the JUnit report.",
+          "args": {
+            "nodeids": ["tests/test_status.py::test_status_response_meets_250_ms_deadline"],
+            "expect": "pass",
+            "junit_contains": ["250_ms"],
+            "success_note": "REQ-COM-002 holds: the status response came in under 250 ms, measured monotonically, and the JUnit evidence records the testcase."
+          }
+        },
+        {
+          "type": "quiz",
+          "id": "quiz",
+          "question": "A timing test with a 250 ms deadline fails roughly 1 run in 20. What is your first move?",
+          "options": [
+            "Delete the test — flaky tests erode trust in the suite",
+            "Measure the latency distribution across many runs and set the margin (or find the cause) from that evidence",
+            "Raise the deadline to 10 seconds so it always passes",
+            "Mark it xfail and move on to the next task"
+          ],
+          "answer_index": 1,
+          "explanation": "A 1-in-20 failure is a measurement of the tail. First quantify it (min/median/max/p95 over many runs, on the machine that fails), then either fix the cause the tail points at or set a margin the data defends. Deleting, loosening blindly, or xfail-ing all destroy the signal without touching the cause."
+        },
+        {
+          "type": "explain",
+          "id": "explain",
+          "question": "Why does a 1-in-20 failure at 250 ms indicate a design or margin question rather than bad luck — and what do you measure before changing anything?",
+          "keywords": ["distribution", "measure", "margin"],
+          "sample_answer": "Repeated runs sample a latency distribution; a 1-in-20 failure means the tail of that distribution crosses 250 ms, which is a property of the system and its load, not luck. Before changing anything I measure the distribution — many samples, min/median/max and tail percentiles, on the environment that actually fails — then choose a margin from that evidence or chase the cause the tail reveals."
+        }
+      ],
+      "hints": [
+        { "level": 1, "text": "What varies between two identical runs of the same request? Where does that variance come from, and how would you see it?" },
+        { "level": 2, "text": "Read LabClient.request() in src/testlab/client.py — which clock it starts and stops — and the assertion in tests/test_status.py::test_status_response_meets_250_ms_deadline. The requirement text is in requirements/software_requirements.csv." },
+        { "level": 3, "text": "Loop the test to see variance: PowerShell `1..20 | % { .venv\\Scripts\\python -m pytest -q tests/test_status.py::test_status_response_meets_250_ms_deadline }` and watch for a red iteration. Then run the 50-sample snippet from the do block under load (start the hammer from lesson 1 first) and compare max values." }
+      ]
+    }
+  ]
+}

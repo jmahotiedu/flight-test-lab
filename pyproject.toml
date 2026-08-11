@@ -18,10 +18,17 @@ dev = [
     "pytest-cov>=6.0",
     "ruff>=0.9",
 ]
+# Build tooling for the C++ DUT (cpp/).  Installed from PyPI so the build
+# system is pinned per-checkout and needs no admin rights; the compiler and
+# debugger themselves still come from the platform (g++/clang++/MSVC, gdb).
+cpp = [
+    "cmake>=3.28",
+    "ninja>=1.11",
+]
 
 [tool.setuptools.packages.find]
 where = ["src", "."]
-include = ["testlab*", "simulator*"]
+include = ["testlab*", "simulator*", "learning*"]
 
 [tool.pytest.ini_options]
 addopts = "-ra --strict-markers"
@@ -33,7 +40,7 @@ markers = [
 [tool.ruff]
 target-version = "py311"
 line-length = 88
-src = ["src", "simulator", "tests"]
+src = ["src", ".", "tests"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "SIM"]
@@ -41,7 +48,7 @@ select = ["E", "F", "I", "B", "UP", "SIM"]
 [tool.mypy]
 python_version = "3.11"
 strict = true
-files = ["src", "simulator"]
+files = ["src", "simulator", "learning"]
 
 [tool.coverage.run]
 source = ["testlab", "simulator"]

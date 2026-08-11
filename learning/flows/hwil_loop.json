@@ -1,0 +1,45 @@
+{
+  "title": "Synthetic HWIL-style test loop",
+  "stages": [
+    {
+      "name": "test controller",
+      "what": "pytest orchestrates: picks the DUT port, launches the process, sequences tests, collects results.",
+      "why": "On a real rig this is the test executive — the thing that owns the run and the bench.",
+      "source": "tests/conftest.py",
+      "concepts": "orchestration, ownership",
+      "failures": "Two controllers on one bench corrupt each other's run — hence exclusive resource ownership."
+    },
+    {
+      "name": "stimulus",
+      "what": "LabClient drives inputs: status requests, malformed bytes, timing pressure, concurrent load.",
+      "why": "Stimulus must be deterministic and logged, or a failure cannot be reproduced.",
+      "source": "src/testlab/client.py",
+      "concepts": "stimulus generation",
+      "failures": "Uncontrolled timing in stimulus (sleep-based waits) makes results environment-dependent."
+    },
+    {
+      "name": "DUT",
+      "what": "The device under test — here the simulator; on a bench, real hardware with real I/O latency.",
+      "why": "The simulator shares your clock and OS; hardware does not. That gap is the whole reason HWIL exists.",
+      "source": "simulator/simulator.py",
+      "concepts": "sim vs hardware, fault insertion",
+      "failures": "Assumptions the simulator never violates (instant responses, perfect framing) fail first on hardware."
+    },
+    {
+      "name": "telemetry",
+      "what": "Responses plus the DUT's own log: dut_ready, request/response lines, shutdown events, fault_injected lines.",
+      "why": "Telemetry is the DUT's side of the story — required to classify product vs harness failures.",
+      "source": "evidence/logs/dut.log",
+      "concepts": "telemetry, logging",
+      "failures": "Without DUT-side logs, a red test is one person's word against another's."
+    },
+    {
+      "name": "capture / evaluation",
+      "what": "Assertions evaluate behavior; JUnit + logs + manifest capture the run for later audit.",
+      "why": "A lab result you cannot re-run or re-inspect is an anecdote, not evidence.",
+      "source": "evidence/, requirements/traceability.csv",
+      "concepts": "evaluation, evidence, manifests",
+      "failures": "Evaluation without capture forces re-runs; capture without configuration identity makes re-runs meaningless."
+    }
+  ]
+}

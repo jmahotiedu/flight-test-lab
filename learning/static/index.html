@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>flight-test-lab — learning environment</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <span class="brand">flight-test-lab</span>
+    <nav>
+      <button id="nav-focus" class="active" data-view="focus">Focus</button>
+      <button id="nav-roadmap" data-view="roadmap">Roadmap</button>
+      <button id="nav-interview" data-view="interview">Interview</button>
+    </nav>
+    <div class="progress-wrap">
+      <span class="progress-label" id="program-label">—</span>
+      <div class="progressbar"><div id="program-bar" style="width:0%"></div></div>
+    </div>
+  </header>
+
+  <div class="mastery hidden" id="mastery"></div>
+
+  <main>
+    <section id="view-focus"></section>
+    <section id="view-roadmap" class="hidden"></section>
+    <section id="view-interview" class="hidden">
+      <div class="interview-card">
+        <h2>Interview mode</h2>
+        <p class="muted">Answer aloud-quality questions from the material. Weak concepts come back more often. Type your answer, then compare with the reference.</p>
+        <p id="interview-question">Loading…</p>
+        <textarea id="interview-answer" placeholder="Your answer…"></textarea>
+        <div style="margin-top:8px; display:flex; gap:8px;">
+          <button class="primary" id="interview-submit">Submit answer</button>
+          <button id="interview-next">Next question</button>
+        </div>
+        <div id="interview-feedback"></div>
+      </div>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

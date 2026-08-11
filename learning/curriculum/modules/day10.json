@@ -1,0 +1,219 @@
+{
+  "lessons": [
+    {
+      "id": "d10-pipeline-anatomy",
+      "title": "Reading a CI pipeline: triggers, jobs, steps, artifacts",
+      "objective": "Read .github/workflows/ci.yml and .gitlab-ci.yml fluently — two dialects describing the same quality-and-test pipeline.",
+      "estimated_minutes": 14,
+      "status": "available",
+      "concepts": ["ci-cd", "requirements-evidence"],
+      "prerequisites": ["d9-deterministic-timing"],
+      "source_files": [".github/workflows/ci.yml", ".gitlab-ci.yml"],
+      "flow": "ci_pipeline",
+      "requirements": [],
+      "blocks": [
+        {
+          "type": "learn",
+          "id": "learn",
+          "text": "Two files describe the same automation in two dialects.\n\n`.github/workflows/ci.yml` (GitHub Actions): `on:` triggers (push to `main`, every `pull_request`) → one job `quality-and-test` on `ubuntu-latest` with `timeout-minutes: 10` → sequential **steps**.\n\n`.gitlab-ci.yml` (GitLab): `default: image: python:3.12-bookworm` → **stages** (`quality`, `test`) → jobs grouped by stage.\n\nBoth end identically: everything under `evidence/` is uploaded **unconditionally** — `if: always()` on GitHub, `artifacts: when: always` on GitLab.",
+          "more": "Anatomy worth memorizing: the trigger (`on:` / implicit) decides *when* the pipeline runs; the runner image (`runs-on: ubuntu-latest`, `image: python:3.12-bookworm`) decides *where*; `timeout-minutes: 10` bounds a hung job so a stuck test cannot burn runner hours forever. GitHub steps execute in order and a nonzero exit aborts the job — unless a step opts out with `if: always()`. GitLab's `artifacts:reports:junit` goes further than storage: GitLab parses `evidence/junit/test-results.xml` and renders per-test results in the merge-request UI. GitHub's `if-no-files-found: error` makes *missing* evidence itself a pipeline failure — silence is not allowed to pass."
+        },
+        {
+          "type": "predict",
+          "id": "predict",
+          "question": "In ci.yml, the 'Run tests' step exits nonzero. What happens to the 'Upload evidence' step that follows it?",
+          "options": [
+            "It is skipped — a failed step aborts the rest of the job",
+            "It runs anyway — the step carries if: always()",
+            "The whole job retries from the top",
+            "It runs only on the main branch"
+          ],
+          "answer_index": 1,
+          "reveal": "Ordinarily a failed step aborts the job, but `if: always()` overrides the default condition for exactly this step. The JUnit XML and logs upload even on a red run — which is precisely when you need to download them."
+        },
+        {
+          "type": "do",
+          "id": "do",
+          "instructions": "Open both pipeline files and trace them against each other:\n\n```code .github/workflows/ci.yml .gitlab-ci.yml\n```\n\nIn `ci.yml`, find: the `on:` triggers, `runs-on`, `timeout-minutes`, the lint/format/typecheck/test steps, and the `if: always()` on the upload step. In `.gitlab-ci.yml`, find `stages:`, the `default: image:`, `artifacts: when: always` in `default:`, and the job-level `artifacts:reports:junit`. For each GitHub construct, name the GitLab line that expresses the same thing (and note what only one of them does, e.g. `timeout-minutes`).",
+          "command": "code .github/workflows/ci.yml .gitlab-ci.yml"
+        },
+        {
+          "type": "verify",
+          "id": "verify",
+          "validator": "artifact_check",
+          "mandatory": true,
+          "description": "Checks that ci.yml really contains the unconditional evidence upload and the JUnit-producing test step you just read.",
+          "args": {
+            "file": ".github/workflows/ci.yml",
+            "contains": ["upload-artifact", "if: always()", "junitxml"],
+            "success_note": "ci.yml confirmed: tests write JUnit XML and the upload-artifact step runs if: always() — evidence survives a red run."
+          }
+        },
+        {
+          "type": "quiz",
+          "id": "quiz",
+          "question": "Why does the artifact-upload step use if: always() instead of the default condition?",
+          "options": [
+            "So the pipeline finishes faster by skipping dependency checks",
+            "Because upload-artifact@v4 requires an explicit condition",
+            "So evidence uploads even when tests fail — a failing run is exactly when the JUnit XML and logs are needed for diagnosis",
+            "So the artifact is retained longer than the default 90 days"
+          ],
+          "answer_index": 2,
+          "explanation": "The default step condition is success() — it only runs if everything before it passed. A red test run is the one case where the evidence is indispensable, so the upload must be unconditional. The same idea appears in GitLab as `artifacts: when: always`."
+        },
+        {
+          "type": "explain",
+          "id": "explain",
+          "question": "GitHub stores the artifact as a zip download; GitLab does something more with the JUnit file. Which GitLab key is that, and what does it buy you?",
+          "keywords": ["reports", "junit"],
+          "sample_answer": "`artifacts:reports:junit: evidence/junit/test-results.xml` tells GitLab to parse the JUnit XML as a test report, so per-test pass/fail results render directly in the merge-request UI instead of requiring an artifact download."
+        }
+      ],
+      "hints": [
+        { "level": 1, "text": "Both files answer the same five questions: when does it run, where does it run, what does it run, how long may it take, and what survives the run." },
+        { "level": 2, "text": "In ci.yml read the `on:` block, the `quality-and-test` job, and the last step. In .gitlab-ci.yml read `default:`, `stages:`, and the `test` job's `artifacts:` block." },
+        { "level": 3, "text": "GitHub step condition `if: always()` (ci.yml, Upload evidence step) = GitLab `artifacts: when: always` (default block). GitLab-only extra: `artifacts:reports:junit` turns the XML into a rendered test report." }
+      ]
+    },
+    {
+      "id": "d10-quality-gates",
+      "title": "The gate chain: ruff, format, mypy, pytest",
+      "objective": "Run the four CI quality gates locally, exactly as CI runs them, and internalize the nonzero-exit contract each one enforces.",
+      "estimated_minutes": 10,
+      "status": "available",
+      "concepts": ["ci-cd"],
+      "prerequisites": ["d10-pipeline-anatomy"],
+      "source_files": [".github/workflows/ci.yml", ".gitlab-ci.yml", "pyproject.toml"],
+      "requirements": [],
+      "blocks": [
+        {
+          "type": "learn",
+          "id": "learn",
+          "text": "CI enforces a **gate chain**. Every tool honors the same contract: exit 0 means pass, anything nonzero fails the job.\n\n1. `ruff check src simulator tests learning` — lint\n2. `ruff format --check src simulator tests learning` — formatting, check-only: it reports, never rewrites\n3. `mypy src simulator learning` — strict type checking\n4. `pytest` — the suite itself\n\nThe order is deliberate: cheapest and fastest first. A lint failure in seconds saves the minutes a full test run would have burned.",
+          "more": "The configurations live in `pyproject.toml`, so local and CI runs share one source of truth: ruff's line length and lint rules, mypy's `strict = true`, pytest's `--strict-markers`. That is what makes \"run the same commands locally\" meaningful — you are not approximating CI, you are executing it. `--check` on `ruff format` is the read-only twin of `ruff format`: it exits 1 and lists files it *would* reformat, without touching them. GitHub runs the four as separate steps (you see which gate failed at a glance); GitLab chains them in one `script:` list (first failure aborts the rest). Same gates, different granularity."
+        },
+        {
+          "type": "predict",
+          "id": "predict",
+          "question": "ruff format --check prints \"1 file would be reformatted\" and exits 1. Did it modify the file?",
+          "options": [
+            "Yes — that is how ruff enforces formatting",
+            "No — --check is read-only; only plain `ruff format` rewrites",
+            "Yes, but only files under src/",
+            "No, and it also exits 0"
+          ],
+          "answer_index": 1,
+          "reveal": "--check turns the formatter into a pure verifier: nonzero exit and a report, zero writes. In CI that is exactly what you want — the pipeline judges, it does not edit. Locally, `ruff format src simulator tests learning` is the fix."
+        },
+        {
+          "type": "do",
+          "id": "do",
+          "instructions": "Run the full gate chain locally, exactly as CI does (repo root, venv active):\n\n```ruff check src simulator tests learning\nruff format --check src simulator tests learning\nmypy src simulator learning\npython -m pytest\n```\n\nAll four must exit 0. If any gate fails, fix what it reports and rerun it before moving on — that loop is the point of the exercise.",
+          "command": "ruff check src simulator tests learning"
+        },
+        {
+          "type": "verify",
+          "id": "verify",
+          "validator": "python_probe",
+          "mandatory": true,
+          "description": "Runs the first gate (ruff check) in a subprocess from the repo root and requires the exit code to be 0 — the same contract CI enforces.",
+          "args": {
+            "snippet": "import subprocess, sys\nr = subprocess.run([sys.executable, '-m', 'ruff', 'check', 'src', 'simulator', 'tests', 'learning'], capture_output=True)\nprint('ruff exit:', r.returncode)",
+            "expect_stdout_regex": "ruff exit: 0",
+            "timeout_seconds": 60,
+            "success_note": "ruff check exits 0 on src, simulator, tests, and learning — the first gate is green locally, exactly as CI will run it."
+          }
+        },
+        {
+          "type": "explain",
+          "id": "explain",
+          "question": "CI will run all four gates anyway. Why run the identical chain locally before pushing?",
+          "keywords": ["feedback", "local", "fast", "push", "fail"],
+          "sample_answer": "Local runs give feedback in seconds without spending CI minutes or publishing a red commit for the team to see. Because pyproject.toml makes the local and CI configurations identical, a locally green chain almost never fails remotely — CI becomes a confirmation, not a discovery."
+        }
+      ],
+      "hints": [
+        { "level": 1, "text": "Each gate is a process with the same contract you saw in the main() lesson: exit 0 or the job goes red. Nothing else about them is magic." },
+        { "level": 2, "text": "The exact four commands are the `run:` lines of the Lint / Check formatting / Type check / Run tests steps in .github/workflows/ci.yml — copy them verbatim." },
+        { "level": 3, "text": "Check a gate's exit code after each run: `echo $LASTEXITCODE` in PowerShell (`echo $?` in bash). If ruff format --check complains, `ruff format src simulator tests learning` applies the fix." }
+      ]
+    },
+    {
+      "id": "d10-failing-check-evidence",
+      "title": "A controlled failure: evidence when the test goes red",
+      "objective": "Inject a deliberate test failure, capture its JUnit evidence, and connect the red exit code to the unconditional artifact upload from the pipeline.",
+      "estimated_minutes": 12,
+      "status": "available",
+      "concepts": ["ci-cd", "requirements-evidence", "failure-diagnosis"],
+      "prerequisites": ["d10-quality-gates"],
+      "source_files": ["pyproject.toml", ".github/workflows/ci.yml"],
+      "requirements": ["REQ-LEARN-002"],
+      "blocks": [
+        {
+          "type": "learn",
+          "id": "learn",
+          "text": "A failing test is when evidence matters most — and pytest keeps collecting it. The assertion fails, pytest records a `<failure>` node (with the message) inside the testcase in the JUnit XML, writes the file anyway, and exits 1.\n\nIn CI, that exit 1 turns the job red, and the `if: always()` upload step from the first lesson still ships the XML. Red run, intact evidence.\n\nYou will now inject that failure **on purpose**, tagged with a requirement marker, and read the evidence it leaves behind.",
+          "more": "pytest exit codes are a small vocabulary: 0 = all passed, 1 = tests ran and some failed, 2 = interrupted, 5 = no tests collected. CI only distinguishes zero/nonzero, but you will see these in logs. The JUnit `<failure>` node carries the assertion message in its `message` attribute and the traceback as its text — that is what GitLab renders via `artifacts:reports:junit` and what you download from GitHub's `test-evidence` artifact. The `@pytest.mark.requirement(...)` marker is registered in pyproject.toml (`--strict-markers` is on, so an unregistered marker would itself be an error); it is what ties a red testcase back to the requirement it verifies."
+        },
+        {
+          "type": "predict",
+          "id": "predict",
+          "question": "You run pytest on a failing test with --junitxml=evidence/exercises/results.xml. What is the exit code, and does results.xml get written?",
+          "options": [
+            "Exit 1, and results.xml is written containing a <failure> node",
+            "Exit 1, so results.xml is not written",
+            "Exit 0, because --junitxml suppresses the failure",
+            "Exit 2, because the test is outside the tests/ directory"
+          ],
+          "answer_index": 0,
+          "reveal": "Test failures are exit 1 — and writing the JUnit report is part of pytest's job regardless of outcome. An explicit nodeid overrides the configured testpaths, so a file under evidence/exercises/ runs fine."
+        },
+        {
+          "type": "do",
+          "id": "do",
+          "instructions": "Create `evidence/exercises/test_controlled_failure.py` with one deliberately failing test marked `@pytest.mark.requirement(\"REQ-LEARN-002\")` (hint level 3 has the exact content). Then run it and capture the report:\n\n```New-Item -ItemType Directory -Force evidence\\exercises   # PowerShell; bash: mkdir -p evidence/exercises\npython -m pytest evidence/exercises/test_controlled_failure.py --junitxml=evidence/exercises/results.xml\necho $LASTEXITCODE   # PowerShell; bash: echo $?\n```\n\nConfirm the exit code is 1. Then open `evidence/exercises/results.xml`, find the `<testcase>` for `test_controlled_failure`, and read the `<failure>` node — its `message` attribute should carry your injected message.",
+          "command": "python -m pytest evidence/exercises/test_controlled_failure.py --junitxml=evidence/exercises/results.xml"
+        },
+        {
+          "type": "verify",
+          "id": "verify-fail",
+          "validator": "pytest_check",
+          "mandatory": true,
+          "description": "Re-runs your controlled failure in a sandboxed evidence directory and requires pytest to exit nonzero with the testcase present in the JUnit report — proving the failure and its evidence are both real.",
+          "args": {
+            "nodeids": ["evidence/exercises/test_controlled_failure.py"],
+            "expect": "fail",
+            "junit_contains": ["test_controlled_failure"],
+            "timeout_seconds": 60
+          }
+        },
+        {
+          "type": "verify",
+          "id": "verify-evidence",
+          "validator": "artifact_check",
+          "mandatory": true,
+          "description": "Checks that your own results.xml — the file you produced, not the sandbox's — parses as JUnit XML and contains the failed testcase.",
+          "args": {
+            "file": "evidence/exercises/results.xml",
+            "junit_testcase": "test_controlled_failure",
+            "success_note": "results.xml contains the test_controlled_failure testcase — the failure left durable, parseable evidence, exactly as it would inside a CI artifact."
+          }
+        },
+        {
+          "type": "explain",
+          "id": "explain",
+          "question": "If this failing test ran inside the GitHub Actions job, which step configuration guarantees the evidence would survive the red test — and why?",
+          "keywords": ["always", "artifact"],
+          "sample_answer": "The upload-artifact step carries `if: always()`, so it executes even though the test step exited nonzero. The JUnit XML with the <failure> node is uploaded in the test-evidence artifact either way — the failing run is precisely the one you need to download."
+        }
+      ],
+      "hints": [
+        { "level": 1, "text": "pytest does not stop at the assertion — it records it. Think about where the record goes (the --junitxml file) and what exit code CI will see." },
+        { "level": 2, "text": "The marker is registered in pyproject.toml under [tool.pytest.ini_options] markers as requirement(identifier). --strict-markers is active, so spell it exactly: @pytest.mark.requirement(\"REQ-LEARN-002\")." },
+        { "level": 3, "text": "Exact file content for evidence/exercises/test_controlled_failure.py:\n\n```import pytest\n\n\n@pytest.mark.requirement(\"REQ-LEARN-002\")\ndef test_controlled_failure():\n    assert False, \"injected failure for evidence study\"\n```" },
+        { "level": 4, "text": "After the run, results.xml should contain a line like: <failure message=\"injected failure for evidence study\"> — search the file for '<failure' to jump straight to it." }
+      ]
+    }
+  ]
+}

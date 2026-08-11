@@ -1,0 +1,235 @@
+{
+  "lessons": [
+    {
+      "id": "d7-traceability-chain",
+      "title": "The traceability chain: requirement to evidence",
+      "objective": "Trace one requirement end to end: CSV row, pytest marker, test, execution, JUnit result, and DUT log — and prove each link exists.",
+      "estimated_minutes": 10,
+      "concepts": ["requirements-evidence"],
+      "prerequisites": ["d6-broken-cleanup-sandbox"],
+      "source_files": [
+        "requirements/software_requirements.csv",
+        "requirements/traceability.csv",
+        "tests/test_status.py",
+        "evidence/junit/test-results.xml",
+        "evidence/logs/dut.log"
+      ],
+      "flow": "requirement_evidence",
+      "requirements": ["REQ-COM-002"],
+      "blocks": [
+        {
+          "type": "learn",
+          "id": "learn",
+          "text": "Every requirement lives on a **chain**, and each link is a file you can open:\n\n1. `requirements/software_requirements.csv` — the requirement itself (REQ-COM-002: status within 250 ms).\n2. `tests/test_status.py` — `@pytest.mark.requirement(\"REQ-COM-002\")` binds a test to it.\n3. Execution — the suite runs the test against a live DUT.\n4. `evidence/junit/test-results.xml` — the machine-readable result.\n5. `evidence/logs/dut.log` — the DUT's own record of the run.\n\n`requirements/traceability.csv` is the map: requirement_id → test_case → evidence.",
+          "more": "This is the DO-178 / MIL-STD audit pattern shrunk to five files. An auditor never trusts a claim of coverage; they walk the chain. The pytest marker is the *load-bearing* link: without it, the traceability row is a human assertion, but with it a tool can enumerate markers (`pytest --collect-only -m requirement` or reading the collected items) and check the CSV mechanically. Note the asymmetry in the evidence column: most rows point at the JUnit XML (test verdict), but REQ-REC-001 points at `evidence/logs/dut.log` — because its requirement is about DUT process behavior, the DUT's own log is the evidence, not the test's opinion of it."
+        },
+        {
+          "type": "predict",
+          "id": "predict",
+          "question": "In traceability.csv, which artifact is named as the evidence for REQ-COM-002?",
+          "options": [
+            "evidence/logs/dut.log",
+            "evidence/junit/test-results.xml",
+            "requirements/software_requirements.csv",
+            "tests/test_status.py"
+          ],
+          "answer_index": 1,
+          "reveal": "The row is `REQ-COM-002,tests/test_status.py::test_status_response_meets_250_ms_deadline,evidence/junit/test-results.xml`. The JUnit XML is the produced-when-the-suite-runs verdict; the test file is the procedure, not the evidence. dut.log is the evidence for REQ-REC-001 instead."
+        },
+        {
+          "type": "do",
+          "id": "do",
+          "instructions": "Walk the chain for REQ-COM-002 with your own eyes, in order:\n\n1. `Get-Content requirements/software_requirements.csv` — find the REQ-COM-002 row and its acceptance criteria (duration <= 0.250 s).\n2. Open `tests/test_status.py` — find the marker `@pytest.mark.requirement(\"REQ-COM-002\")` and read the assertion in `test_status_response_meets_250_ms_deadline`.\n3. `Select-String -Path requirements/traceability.csv -Pattern REQ-COM-002` — confirm the test_case and evidence columns.\n4. Open `evidence/junit/test-results.xml` — find the `<testcase>` whose name contains `test_status_response_meets_250_ms_deadline`. (If the file is missing, run the suite first: `pwsh scripts/run-tests.ps1`.)\n5. Open `evidence/logs/dut.log` — find the request/response lines from that same run.\n\nEvery link must exist. If one is missing, the chain is broken — that is an audit finding.",
+          "command": "Select-String -Path requirements/traceability.csv -Pattern REQ-COM-002"
+        },
+        {
+          "type": "verify",
+          "id": "verify",
+          "validator": "artifact_check",
+          "mandatory": true,
+          "description": "Checks that traceability.csv contains the full REQ-COM-002 link: the requirement mapped to the exact timing test node ID.",
+          "args": {
+            "file": "requirements/traceability.csv",
+            "csv_row": {
+              "requirement_id": "REQ-COM-002",
+              "test_case": "tests/test_status.py::test_status_response_meets_250_ms_deadline"
+            },
+            "success_note": "The REQ-COM-002 chain is intact: requirement row, marked test, traceability row pointing at the JUnit evidence."
+          }
+        },
+        {
+          "type": "explain",
+          "id": "explain",
+          "question": "In your own words: why is the pytest requirement marker the load-bearing link in the chain, rather than the traceability CSV alone?",
+          "keywords": ["marker", "machine", "tool", "verify", "bind"],
+          "sample_answer": "The CSV alone is a human assertion that a test covers a requirement. The @pytest.mark.requirement marker binds the requirement ID to the test inside the code itself, so a tool can enumerate markers mechanically and check the CSV against reality instead of trusting it."
+        }
+      ],
+      "hints": [
+        { "level": 1, "text": "The chain is five links: requirement CSV row, marked test, execution, JUnit result, DUT log. traceability.csv is the map across them." },
+        { "level": 2, "text": "Start at requirements/software_requirements.csv line 3 (REQ-COM-002), then look at the second test in tests/test_status.py — the decorator directly above it is the binding." },
+        { "level": 3, "text": "The traceability row you should find is exactly: REQ-COM-002,tests/test_status.py::test_status_response_meets_250_ms_deadline,evidence/junit/test-results.xml" }
+      ]
+    },
+    {
+      "id": "d7-add-requirement",
+      "title": "Add a requirement the audited way",
+      "objective": "Add a brand-new requirement REQ-LEARN-001 and carry it through the entire chain: CSV row, marked test, traceability row, executed evidence.",
+      "estimated_minutes": 20,
+      "concepts": ["requirements-evidence", "pytest"],
+      "prerequisites": ["d7-traceability-chain"],
+      "source_files": [
+        "requirements/software_requirements.csv",
+        "requirements/traceability.csv",
+        "tests/test_sequence_echo.py",
+        "tests/test_status.py",
+        "simulator/simulator.py"
+      ],
+      "requirements": ["REQ-LEARN-001"],
+      "blocks": [
+        {
+          "type": "learn",
+          "id": "learn",
+          "text": "Adding a requirement is a **four-artifact change**, in dependency order:\n\n1. Declare it in `software_requirements.csv` (ID, title, shall-statement, verification method, acceptance criteria).\n2. Write the test that verifies it, decorated with `@pytest.mark.requirement(\"REQ-LEARN-001\")`.\n3. Map it in `traceability.csv`: requirement_id → test node ID → evidence file.\n4. Run the suite so the JUnit evidence actually exists.\n\nSkipping step 4 leaves a mapped-but-unexecuted requirement — the classic audit finding.\n\nThe DUT already echoes `sequence` in every response (`build_response()` in `simulator/simulator.py`), so the behavior is there; your job is to *require* it and prove it.",
+          "more": "Ordering matters because each artifact references the previous one: the test's marker names the requirement ID, the traceability row names the test node ID, and the JUnit file only exists after execution. In a real program this is where a CI gate checks chain completeness: every requirement has >= 1 traceability row, every row's test exists and carries the marker, and every row's evidence file exists and is fresh. The verification_method column ('Test' here; REQ-REC-001 uses 'Inspection/Test') records *how* compliance will be shown — it is part of the contract, not decoration."
+        },
+        {
+          "type": "predict",
+          "id": "predict",
+          "question": "You wrote the CSV row and the test but forgot the traceability.csv row. What does an auditor conclude?",
+          "options": [
+            "Nothing — the marker on the test is enough",
+            "The requirement is unmapped: no declared link from requirement to test and evidence",
+            "The suite will fail to collect",
+            "traceability.csv regenerates itself on the next run"
+          ],
+          "answer_index": 1,
+          "reveal": "The marker binds test to requirement in code, but the traceability CSV is the declared map an auditor reads first. A requirement with no row is 'unverified' on paper even if a passing test exists. And nothing regenerates that CSV — it is source, maintained by hand."
+        },
+        {
+          "type": "do",
+          "id": "do",
+          "instructions": "Add REQ-LEARN-001 end to end. All four steps, in order:\n\n**1. Declare it.** Append to `requirements/software_requirements.csv`:\n\n```REQ-LEARN-001,Sequence echo,\"The DUT shall echo the sequence ID of any request in its response.\",Test,\"The response sequence field equals the request sequence field.\"\n```\n\n**2. Write the test.** Create `tests/test_sequence_echo.py` — model it on `tests/test_status.py`. Use the `lab_client` fixture, send a status request with a distinctive sequence (e.g. 42), assert the response payload's `sequence` equals it. Name the test so it contains `sequence_echo` (e.g. `test_sequence_echo_on_status_response`). Decorate it with `@pytest.mark.requirement(\"REQ-LEARN-001\")`.\n\n**3. Map it.** Append to `requirements/traceability.csv`:\n\n```REQ-LEARN-001,tests/test_sequence_echo.py::test_sequence_echo_on_status_response,evidence/junit/test-results.xml\n```\n\n(use your actual test name if it differs).\n\n**4. Execute.** `pwsh scripts/run-tests.ps1` (bash: `bash scripts/run-tests.sh`) — the new test must pass and appear in `evidence/junit/test-results.xml`.",
+          "command": "pwsh scripts/run-tests.ps1"
+        },
+        {
+          "type": "verify",
+          "id": "v-csv",
+          "validator": "artifact_check",
+          "mandatory": true,
+          "description": "Checks the new requirement was declared in software_requirements.csv.",
+          "args": {
+            "file": "requirements/software_requirements.csv",
+            "csv_row": { "requirement_id": "REQ-LEARN-001" },
+            "success_note": "REQ-LEARN-001 is declared with title, shall-statement, method, and acceptance criteria."
+          }
+        },
+        {
+          "type": "verify",
+          "id": "v-trace",
+          "validator": "artifact_check",
+          "mandatory": true,
+          "description": "Checks the traceability map names REQ-LEARN-001 — the requirement must be linked to a test and an evidence file.",
+          "args": {
+            "file": "requirements/traceability.csv",
+            "contains": ["REQ-LEARN-001"],
+            "success_note": "The map row exists: requirement -> test node ID -> evidence/junit/test-results.xml."
+          }
+        },
+        {
+          "type": "verify",
+          "id": "v-test",
+          "validator": "pytest_check",
+          "mandatory": true,
+          "description": "Runs your new test file for real (evidence sandboxed) and confirms the sequence-echo test passes and appears in the JUnit report.",
+          "args": {
+            "nodeids": ["tests/test_sequence_echo.py"],
+            "expect": "pass",
+            "junit_contains": ["sequence_echo"],
+            "timeout_seconds": 60,
+            "success_note": "The chain is complete: declared, tested, mapped, executed — and green."
+          }
+        },
+        {
+          "type": "explain",
+          "id": "explain",
+          "question": "Why must the suite be re-run after adding the requirement, even if the test obviously passes?",
+          "keywords": ["evidence", "executed", "junit", "exist"],
+          "sample_answer": "A traceability row claims an evidence file contains a result for the test. Until the suite runs, evidence/junit/test-results.xml has no such testcase — the claim is unbacked. The requirement is mapped but unexecuted, which is exactly what an audit flags."
+        }
+      ],
+      "hints": [
+        { "level": 1, "text": "Four artifacts in dependency order: declare (CSV), verify (test), map (traceability row), execute (suite run). Each references the previous." },
+        { "level": 2, "text": "Copy the shape of tests/test_status.py: import pytest, use the lab_client fixture, put @pytest.mark.requirement(\"REQ-LEARN-001\") above the test. The fixture is defined in tests/conftest.py." },
+        { "level": 3, "text": "Test skeleton: `@pytest.mark.requirement(\"REQ-LEARN-001\")` then `def test_sequence_echo_on_status_response(lab_client):` — `response = lab_client.request({\"command\": \"status\", \"sequence\": 42})` and assert `response.payload[\"sequence\"] == 42`." },
+        { "level": 4, "text": "Full test file: `import pytest` / `from testlab.client import LabClient` / blank line / `@pytest.mark.requirement(\"REQ-LEARN-001\")` / `def test_sequence_echo_on_status_response(lab_client: LabClient) -> None:` / `    response = lab_client.request({\"command\": \"status\", \"sequence\": 42})` / `    assert response.payload[\"sequence\"] == 42`" }
+      ]
+    },
+    {
+      "id": "d7-evidence-audit",
+      "title": "Evidence is the deliverable",
+      "objective": "Produce the evidence tree with the runner script, audit the JUnit XML against the traceability map, and explain why evidence/ is gitignored.",
+      "estimated_minutes": 12,
+      "concepts": ["requirements-evidence", "ci-cd"],
+      "prerequisites": ["d7-add-requirement"],
+      "source_files": [
+        "scripts/run-tests.ps1",
+        "requirements/traceability.csv",
+        "evidence/junit/test-results.xml",
+        ".gitignore"
+      ],
+      "requirements": [],
+      "blocks": [
+        {
+          "type": "learn",
+          "id": "learn",
+          "text": "The test suite's product is not green output in your terminal — it is the **evidence tree**: `evidence/junit/test-results.xml` (every testcase, machine-readable) and `evidence/logs/` (pytest and DUT logs).\n\n`scripts/run-tests.ps1` exists so evidence is produced **the same way every time**: same junit path, same log settings, same directory layout. CI runs the identical script.\n\nAnd `evidence/` is gitignored. That is deliberate: evidence is *generated*, the CSVs and tests are *source*. You commit the procedure; you regenerate the proof.",
+          "more": "The audit question is always 'show me the result for requirement X', and the answer is a path, not a memory: traceability.csv row -> evidence/junit/test-results.xml -> the testcase node with name, time, and outcome. Because evidence is reproducible from source, committing it would only add noise and merge conflicts — worse, stale committed evidence can *lie*: it claims a run that nobody just performed. Generated artifacts that are inputs to decisions belong in the build output (here, evidence/; in a real pipeline, uploaded CI artifacts with retention), never in version control."
+        },
+        {
+          "type": "predict",
+          "id": "predict",
+          "question": "You clone the repo fresh and open evidence/junit/test-results.xml. What do you find?",
+          "options": [
+            "The latest passing results, committed by the last developer",
+            "Nothing — the file does not exist until someone runs the suite",
+            "A template XML with placeholder testcases",
+            "The CI results, synced automatically on clone"
+          ],
+          "answer_index": 1,
+          "reveal": "evidence/ is gitignored, so a fresh clone has empty directories (kept by .gitkeep files). No result XML exists until the suite runs. Evidence cannot be inherited — it must be produced. The verify below will fail until you run the suite; that failure IS the lesson."
+        },
+        {
+          "type": "do",
+          "id": "do",
+          "instructions": "**Produce, then audit.**\n\n1. Run the runner once: `pwsh scripts/run-tests.ps1` (bash: `bash scripts/run-tests.sh`).\n2. Open `evidence/junit/test-results.xml`. Find the `<testcase>` nodes — locate `test_status_request_returns_ready`, `test_status_response_meets_250_ms_deadline`, and your new `sequence_echo` test. Note the attributes: `name`, `classname`, `time`.\n3. Cross-check against `requirements/traceability.csv`: for each row, does the named test_case appear as a testcase node, and does the named evidence file exist?\n4. `git status --ignored evidence/` — confirm the tree is ignored. Then read the `evidence/*` rules in `.gitignore`.\n\nYou have just done, by hand, what an auditor does.",
+          "command": "pwsh scripts/run-tests.ps1"
+        },
+        {
+          "type": "verify",
+          "id": "verify",
+          "validator": "artifact_check",
+          "mandatory": true,
+          "description": "Looks for a real testcase node in evidence/junit/test-results.xml. This check FAILS until you actually run the suite — that is the point: evidence must exist before it can be audited.",
+          "args": {
+            "file": "evidence/junit/test-results.xml",
+            "junit_testcase": "test_status_request_returns_ready",
+            "success_note": "The evidence exists and contains a real executed testcase — the deliverable an auditor would ask for."
+          }
+        },
+        {
+          "type": "explain",
+          "id": "explain",
+          "question": "Why is generated evidence gitignored while the requirements CSVs are committed?",
+          "keywords": ["generated", "source", "reproduce"],
+          "sample_answer": "The CSVs, tests, and scripts are source — the procedure, maintained by hand and reviewed in diffs. The evidence is generated output: it can be reproduced at any time by running the suite from source. Committing it would add noise and let stale results masquerade as current ones."
+        }
+      ],
+      "hints": [
+        { "level": 1, "text": "Ask of every file: is it the procedure, or the product of running the procedure? Only the procedure belongs in git." },
+        { "level": 2, "text": "Read the evidence/* block in .gitignore (lines around 16-21), then read scripts/run-tests.ps1 to see exactly where the runner writes." },
+        { "level": 3, "text": "If the verify fails with 'does not exist' or 'no testcase matching', the fix is not editing XML — it is running `pwsh scripts/run-tests.ps1` so the evidence is genuinely produced." }
+      ]
+    }
+  ]
+}

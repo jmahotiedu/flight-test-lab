@@ -26,16 +26,27 @@ jobs:
       - name: Install project
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e '.[dev]'
+          python -m pip install -e '.[dev,cpp]'
+
+      - name: Install debugger
+        run: sudo apt-get update && sudo apt-get install -y gdb
+
+      - name: Build the C++ DUT
+        run: |
+          cmake -S cpp -B cpp/build
+          cmake --build cpp/build
+
+      - name: Run CTest
+        run: ctest --test-dir cpp/build -C Debug --output-on-failure
 
       - name: Lint
-        run: ruff check src simulator tests
+        run: ruff check src simulator tests learning
 
       - name: Check formatting
-        run: ruff format --check src simulator tests
+        run: ruff format --check src simulator tests learning
 
       - name: Type check
-        run: mypy src simulator
+        run: mypy src simulator learning
 
       - name: Run tests
         run: |
@@ -46,6 +57,13 @@ jobs:
             --cov=simulator \
             --cov-report=term-missing \
             --cov-report=xml:evidence/coverage.xml
+
+      # The protocol suite must hold against the native DUT as well, not just
+      # the Python one — that is what REQ-CPP-001 claims.
+      - name: Run the protocol suite against the C++ DUT
+        run: |
+          pytest -v --dut cpp tests/test_status.py tests/test_protocol.py \
+            --junitxml=evidence/junit/test-results-cpp.xml
 
       - name: Upload evidence
         if: always()

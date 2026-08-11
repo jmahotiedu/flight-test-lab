@@ -1,0 +1,105 @@
+{
+  "title": "flight-test-lab — 14-day test-automation curriculum",
+  "concepts": [
+    "python-runtime",
+    "protocol-design",
+    "networking",
+    "process-management",
+    "pytest",
+    "timing",
+    "logging",
+    "requirements-evidence",
+    "failure-diagnosis",
+    "ci-cd",
+    "cpp-integration",
+    "debugging",
+    "hwil-reasoning",
+    "concurrency"
+  ],
+  "days": [
+    {
+      "day": 1,
+      "title": "Python Program Structure",
+      "summary": "How the simulator starts: modules, imports, __name__, main(), SystemExit, argparse, logging.",
+      "module": "day01.json"
+    },
+    {
+      "day": 2,
+      "title": "Protocol and State",
+      "summary": "JSON command/response protocols, sequence IDs, validation, error codes — and adding a command test-first.",
+      "module": "day02.json"
+    },
+    {
+      "day": 3,
+      "title": "TCP Server",
+      "summary": "Sockets, loopback, streams, request handlers, encoding, malformed input.",
+      "module": "day03.json"
+    },
+    {
+      "day": 4,
+      "title": "Client Engineering",
+      "summary": "LabClient: connection state, timeouts, buffered readers, monotonic timing, error translation, context managers.",
+      "module": "day04.json"
+    },
+    {
+      "day": 5,
+      "title": "pytest Fundamentals",
+      "summary": "Discovery, assertions, fixtures, scopes, parametrization, markers, failure output.",
+      "module": "day05.json"
+    },
+    {
+      "day": 6,
+      "title": "Process Lifecycle Automation",
+      "summary": "subprocess.Popen, readiness polling, terminate/wait/kill, yield fixtures, orphan risk.",
+      "module": "day06.json"
+    },
+    {
+      "day": 7,
+      "title": "Requirements and Evidence",
+      "summary": "requirement → test → execution → result → evidence: markers, CSVs, JUnit, logs.",
+      "module": "day07.json"
+    },
+    {
+      "day": 8,
+      "title": "Fault Injection",
+      "summary": "Config-driven faults in the DUT; classifying product vs test vs infrastructure vs configuration failures.",
+      "module": "day08.json"
+    },
+    {
+      "day": 9,
+      "title": "Concurrency and Timing",
+      "summary": "Threads, concurrent clients, shared state, races, locks, deterministic tests.",
+      "module": "day09.json"
+    },
+    {
+      "day": 10,
+      "title": "CI/CD",
+      "summary": "Pipelines, jobs, runners, artifacts, quality gates, and what evidence survives a failing check.",
+      "module": "day10.json"
+    },
+    {
+      "day": 11,
+      "title": "C++ DUT",
+      "summary": "The same protocol in C++: headers and translation units, RAII ownership, CMake, CTest, and one harness driving either implementation. Needs a C++ toolchain.",
+      "module": "day11.json"
+    },
+    {
+      "day": 12,
+      "title": "Native Debugging",
+      "summary": "Controlled C++ failures — crash, bad access, deadlock, slow response — read with GDB backtraces and live thread dumps. Needs a C++ toolchain and gdb.",
+      "module": "day12.json"
+    },
+    {
+      "day": 13,
+      "title": "Simulation and HWIL Reasoning",
+      "summary": "Transferable test-architecture: stimulus, DUT, telemetry, fault insertion, shared bench resources.",
+      "module": "day13.json"
+    },
+    {
+      "day": 14,
+      "title": "Capstone and Interview Mode",
+      "summary": "Diagnose an unfamiliar injected failure end-to-end; interview drilling on weak concepts.",
+      "module": "day14.json"
+    }
+  ]
+}

@@ -1,0 +1,185 @@
+{
+  "lessons": [
+    {
+      "id": "d12-debugging",
+      "title": "Symbols and backtraces: reading a crash",
+      "objective": "Crash the C++ DUT on purpose and get a symbolic backtrace out of GDB — then understand what debug symbols are and why an optimised build makes the same crash harder to read.",
+      "estimated_minutes": 20,
+      "status": "available",
+      "requires": ["cpp-build", "gdb"],
+      "concepts": ["debugging", "cpp-integration", "failure-diagnosis"],
+      "prerequisites": ["d11-harness-either-dut"],
+      "source_files": ["cpp/src/server.cpp", "cpp/CMakeLists.txt"],
+      "requirements": [],
+      "blocks": [
+        {
+          "type": "learn",
+          "id": "learn",
+          "text": "A native crash gives you a signal and an address. Debug symbols turn that into a **file, a line, and a call chain**.\n\nThe DUT can crash on demand:\n\n```dut --port 9099 --fault crash --fault-after 0\n```\n\n`--fault-after 0` fires during startup, before any client connects, which makes the crash reproducible in one command — no second process required.\n\nUnder GDB:\n\n```gdb -batch -ex run -ex bt --args cpp/build/bin/dut --port 9099 --fault crash --fault-after 0\n```\n\n`-batch` means \"run these commands and exit\", `run` starts the program, and `bt` prints the stack **at the moment it died**.",
+          "more": "**First, a build requirement.** GDB reads DWARF debug information, which GCC and Clang emit; MSVC emits PDBs instead, and GDB cannot read those. If CMake picked Visual Studio when you configured (check `CMAKE_GENERATOR` in `cpp/build/CMakeCache.txt`), reconfigure this module's build with the GNU toolchain:\n\n```cmake -S cpp -B cpp/build -G Ninja -DCMAKE_CXX_COMPILER=g++\ncmake --build cpp/build\n```\n\nThe Windows equivalents for a PDB build are WinDbg/cdb and Visual Studio's debugger — worth knowing, but the concepts below (symbols, frames, thread stacks) are the same in every one of them.\n\nWhat makes this readable is `CMAKE_BUILD_TYPE=Debug`, which compiles with `-g`: the binary carries DWARF debug information mapping machine addresses back to source lines and variable names. Strip it (or build Release) and the same crash still happens, but the backtrace degrades to addresses and possibly-wrong function names, because the optimiser has inlined frames that no longer exist as separate calls.\n\nThat is the practical tension: the build you ship is the build you must debug. Real projects use RelWithDebInfo — optimised, but with symbols retained — and archive the symbol files alongside the binary so a crash report from the field can still be resolved months later.\n\nA core dump is the same idea moved in time: the OS writes the process's memory image at the moment of death, and you open it later with `gdb <binary> <corefile>`, getting the identical backtrace without needing to reproduce anything. On Linux that is controlled by `ulimit -c` and `/proc/sys/kernel/core_pattern`; on Windows the equivalent is a minidump written by WER or a debugger. The habit that matters transfers everywhere: **capture the state at the moment of failure, because the second occurrence may be weeks away.**"
+        },
+        {
+          "type": "predict",
+          "id": "predict",
+          "question": "The crash is a write through a null pointer inside trigger_crash(). What will frame #0 of the backtrace name?",
+          "options": [
+            "main, because that is where the program started",
+            "trigger_crash, the function executing when the fault occurred",
+            "The C runtime's signal handler",
+            "Nothing — a segfault destroys the stack"
+          ],
+          "answer_index": 1,
+          "reveal": "Frame #0 is the innermost frame: the function that was executing. The frames above it (#1, #2, …) are its callers, so the backtrace reads bottom-up as the path that got you there: main → run_server → maybe_inject_fault → trigger_crash. The stack is intact — the fault was a bad memory access, not stack corruption."
+        },
+        {
+          "type": "do",
+          "id": "do",
+          "instructions": "Reproduce the crash and read the stack yourself.\n\n1. Watch it die without a debugger first, so you see how little you learn:\n\n```cpp/build/bin/dut --port 9099 --fault crash --fault-after 0\necho $LASTEXITCODE   # PowerShell; bash: echo $?\n```\n\n2. Now run it under GDB and get the backtrace:\n\n```gdb -batch -ex run -ex bt --args cpp/build/bin/dut --port 9099 --fault crash --fault-after 0\n```\n\nRead the output top to bottom: which signal, which function, which source line, and the chain of callers. Open `cpp/src/server.cpp` at the line GDB names and confirm it is the write you expected.\n\n3. Ask GDB for more than the stack — add `-ex \"info locals\"` and `-ex \"info registers rip\"` to the same command, and see what the program's state was at the moment of death.\n\n4. Now try the fault that does **not** crash immediately:\n\n```cpp/build/bin/dut --port 9099 --fault bad-access --fault-after 0\n```\n\nIt writes 64 ints into a 4-int buffer. Note whether it dies, survives, or dies somewhere unrelated — and think about what that means for diagnosing memory bugs from a crash report alone.",
+          "command": "gdb -batch -ex run -ex bt --args cpp/build/bin/dut --port 9099 --fault crash --fault-after 0"
+        },
+        {
+          "type": "verify",
+          "id": "verify-backtrace",
+          "validator": "toolchain_check",
+          "mandatory": true,
+          "description": "Runs the DUT under GDB, requires it to die with SIGSEGV, and requires the backtrace to name trigger_crash and its callers — proof the build really carries usable symbols.",
+          "args": {
+            "tool": "gdb",
+            "args": [
+              "-batch",
+              "-ex", "run",
+              "-ex", "bt",
+              "--args", "cpp/build/bin/dut",
+              "--port", "9099",
+              "--fault", "crash",
+              "--fault-after", "0"
+            ],
+            "expect_exit": 0,
+            "expect_output_regex": "SIGSEGV[\\s\\S]*trigger_crash[\\s\\S]*run_server[\\s\\S]*main",
+            "timeout_seconds": 120,
+            "success_note": "GDB caught SIGSEGV and resolved the full call chain — trigger_crash, called from maybe_inject_fault, from run_server, from main — with file and line numbers. Those names exist because the binary was built with debug symbols."
+          }
+        },
+        {
+          "type": "quiz",
+          "id": "quiz",
+          "question": "Why does a Release build make this same crash harder to diagnose?",
+          "options": [
+            "Release builds disable signal handling, so there is no SIGSEGV",
+            "The optimiser inlines and reorders code, so frames the source implies may not exist in the backtrace, and without -g there are no file/line mappings at all",
+            "GDB refuses to attach to optimised binaries",
+            "Release builds run too fast for the debugger to catch the fault"
+          ],
+          "answer_index": 1,
+          "explanation": "The crash is identical at the hardware level — the difference is entirely in what the binary can tell you about itself. Inlined frames vanish from the stack, variables get optimised into registers so `info locals` reports <optimized out>, and with no debug information the backtrace is bare addresses. Hence RelWithDebInfo plus archived symbols for anything you intend to support in the field."
+        },
+        {
+          "type": "explain",
+          "id": "explain",
+          "question": "The bad-access fault writes far past the end of a 4-element buffer, yet it often does not crash. Why is that worse than a clean segfault, and what would you reach for to catch it?",
+          "keywords": ["corrupt", "later", "undefined", "sanitizer", "valgrind", "asan", "silent"],
+          "sample_answer": "It is undefined behaviour that corrupts adjacent memory instead of faulting: the damage is silent, and the crash — if it comes at all — lands in unrelated code long after the real bug, with a backtrace that points at the victim rather than the culprit. A clean segfault at least names the guilty line. To catch it you want a tool that checks every access: AddressSanitizer (-fsanitize=address) or Valgrind, which report the out-of-bounds write at the moment it happens, with the allocation it overran."
+        }
+      ],
+      "hints": [
+        { "level": 1, "text": "Frame #0 is where it died; the higher numbers are who called it. Read the backtrace bottom-up to follow the path in." },
+        { "level": 2, "text": "The exact fault line is in cpp/src/server.cpp inside trigger_crash(): a write through a deliberately null volatile pointer." },
+        { "level": 3, "text": "GDB batch syntax: every -ex is one command, in order, and --args must come last because everything after it is the program plus its arguments." },
+        { "level": 4, "text": "Full command with locals: gdb -batch -ex run -ex bt -ex \"info locals\" --args cpp/build/bin/dut --port 9099 --fault crash --fault-after 0" },
+        { "level": 5, "text": "If GDB reports 'No symbol table info available' or refuses to resolve any frame, your binary was probably built by MSVC (PDB symbols, which GDB cannot read). Reconfigure with the GNU toolchain: cmake -S cpp -B cpp/build -G Ninja -DCMAKE_CXX_COMPILER=g++ && cmake --build cpp/build" }
+      ]
+    },
+    {
+      "id": "d12-hang-vs-slow",
+      "title": "Hung or just slow? Diagnosing a live process",
+      "objective": "Tell a deadlock apart from a slow response using evidence rather than guesswork — attach GDB to a wedged DUT, read every thread's stack, and name the blocking call.",
+      "estimated_minutes": 22,
+      "status": "available",
+      "requires": ["cpp-build", "gdb"],
+      "concepts": ["debugging", "concurrency", "failure-diagnosis", "timing"],
+      "prerequisites": ["d12-debugging"],
+      "source_files": ["cpp/src/server.cpp", "src/testlab/client.py"],
+      "requirements": [],
+      "blocks": [
+        {
+          "type": "learn",
+          "id": "learn",
+          "text": "From the client, a hang and a slow response look identical: your `LabClient` raises `LabCommunicationError` after the response timeout either way.\n\nThey are not the same failure:\n\n* **Slow** — the DUT is working and will answer. Raise the timeout and it passes.\n* **Hung** — the DUT will *never* answer. No timeout is long enough.\n\nGuessing between them wastes hours. Attaching a debugger settles it in seconds:\n\n```gdb -p <pid> -batch -ex \"thread apply all bt\"\n```\n\nA hung process shows a thread parked in a blocking call — a mutex lock, a socket read, a condition wait. A slow one shows threads doing work, or sleeping with a deadline.",
+          "more": "`--fault hang` builds a textbook deadlock: the main thread takes a mutex before the server starts accepting, and the connection handler then tries to take the same mutex. The handler thread blocks forever; the rest of the process stays alive, still accepting connections it will never answer. That partial-liveness is what makes deadlocks so confusing in production — the health check may still pass.\n\n`thread apply all bt` is the single most valuable command for this class of bug: it prints a backtrace for *every* thread, so you see both halves of the deadlock — who is waiting, and (in the frames of the other threads) who is holding.\n\nThe Python equivalents are worth knowing since your harness is Python: `faulthandler.dump_traceback_later(seconds)` prints every thread's stack if the process is still alive at the deadline, and py-spy dumps a live process's stacks without stopping it. Same instinct, different tool — when something is stuck, take a stack sample before you take a guess."
+        },
+        {
+          "type": "predict",
+          "id": "predict",
+          "question": "The DUT is started with --fault hang and you send one status request. What does the process do next?",
+          "options": [
+            "It exits with an error, since the handler cannot proceed",
+            "It keeps running and keeps accepting new connections, but that request is never answered",
+            "It answers after the fault delay expires",
+            "It crashes with a deadlock detection error"
+          ],
+          "answer_index": 1,
+          "reveal": "Only the handler thread is blocked. The accept loop is a different thread, so the process stays alive and even accepts more connections — every one of which will wedge the same way. Nothing detects this: C++ mutexes have no deadlock detector, and the OS is content to let a thread wait forever."
+        },
+        {
+          "type": "do",
+          "id": "do",
+          "instructions": "Produce both failures and tell them apart with evidence.\n\n**The slow one** — start the DUT with a 400 ms delay and watch the client's own timeout decide the verdict:\n\n```cpp/build/bin/dut --port 9101 --fault slow --fault-after 1 --fault-delay-ms 400\n```\n\nIn another terminal:\n\n```python -c \"from testlab.client import LabClient; c = LabClient('127.0.0.1', 9101, response_timeout=0.2); c.connect(); print(c.request({'command':'status','sequence':1}))\"\n```\n\nThat raises `LabCommunicationError`. Re-run it with `response_timeout=1.0` and it succeeds — the DUT was working all along.\n\n**The hung one** — same experiment, different fault:\n\n```cpp/build/bin/dut --port 9102 --fault hang --fault-after 1\n```\n\nSend a request with a generous timeout. It still fails. Raising the timeout again will not help, so stop guessing and look:\n\n```gdb -p <pid> -batch -ex \"thread apply all bt\"\n```\n\nFind the thread whose stack contains `trigger_hang` and note what it is blocked in, and which function called it. Then check the DUT's log: which line is the last one written, and what does that tell you about how far the request got?",
+          "command": "gdb -p <pid> -batch -ex \"thread apply all bt\""
+        },
+        {
+          "type": "verify",
+          "id": "verify-hang",
+          "validator": "toolchain_check",
+          "mandatory": true,
+          "description": "Starts the DUT with the hang fault, sends it one request, attaches GDB, and requires the thread dump to show a handler thread blocked in trigger_hang.",
+          "args": {
+            "tool": "gdb-attach",
+            "dut_args": ["--fault", "hang", "--fault-after", "1"],
+            "gdb_commands": ["thread apply all bt"],
+            "expect_exit": 0,
+            "expect_output_regex": "trigger_hang[\\s\\S]*handle_connection",
+            "timeout_seconds": 180,
+            "poke_timeout_seconds": 1.5,
+            "success_note": "GDB attached to the wedged process and showed the handler thread blocked inside trigger_hang, called from handle_connection — a deadlock identified from the process itself rather than inferred from a timeout."
+          }
+        },
+        {
+          "type": "verify",
+          "id": "verify-slow",
+          "validator": "behavior_probe",
+          "mandatory": true,
+          "description": "Runs the slow fault against a live DUT and requires a correct — merely late — response, proving 'slow' and 'hung' are different failures.",
+          "args": {
+            "dut": "cpp",
+            "dut_args": ["--fault", "slow", "--fault-after", "1", "--fault-delay-ms", "400"],
+            "steps": [
+              {
+                "send": {"command": "status", "sequence": 1},
+                "expect": {"status": "ok", "state": "READY"},
+                "min_elapsed_ms": 350,
+                "max_elapsed_ms": 3000
+              }
+            ],
+            "response_timeout": 3.0,
+            "log_expect_regex": "fault_injected fault=slow",
+            "timeout_seconds": 60,
+            "success_note": "The slow DUT answered correctly, just late (>350 ms), and logged the injected fault. A longer timeout fixes this failure; no timeout fixes the hang."
+          }
+        },
+        {
+          "type": "explain",
+          "id": "explain",
+          "question": "A nightly run reports one intermittent timeout against a DUT you cannot reproduce locally. What evidence would you want captured automatically at the moment of the timeout, and why that rather than a longer timeout?",
+          "keywords": ["stack", "thread", "dump", "log", "timestamp", "evidence", "reproduce"],
+          "sample_answer": "A thread dump of the DUT (gdb thread apply all bt, or faulthandler/py-spy for Python), the DUT log with timestamps around the failure, and the harness's own measured elapsed time. That distinguishes 'blocked forever' from 'took 4 seconds' — the two need opposite fixes. Raising the timeout only hides the first case and destroys the evidence, because the next run passes and nobody looks again."
+        }
+      ],
+      "hints": [
+        { "level": 1, "text": "Ask the process, do not guess: a stuck thread's stack names the exact call it is waiting in." },
+        { "level": 2, "text": "The blocked thread's frames run trigger_hang → handle_connection → the std::thread invoke machinery. The mutex it wants was taken in run_server before the accept loop started." },
+        { "level": 3, "text": "Find the pid on Windows with `Get-Process dut | Select-Object Id`, or note it when you start the process; then `gdb -p <pid> -batch -ex \"thread apply all bt\"`." },
+        { "level": 4, "text": "The decisive difference to state in your write-up: the slow DUT logs a response line after the delay; the hung DUT's log stops after the request line and never logs a response, because that thread never returns." }
+      ]
+    }
+  ]
+}

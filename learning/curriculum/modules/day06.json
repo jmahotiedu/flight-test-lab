@@ -1,0 +1,202 @@
+{
+  "lessons": [
+    {
+      "id": "d6-popen-lifecycle",
+      "title": "Popen is an OS child handle, not a script",
+      "objective": "Drive the full subprocess lifecycle — spawn, poll, terminate, wait, reap — against the real simulator, and know which call does what.",
+      "estimated_minutes": 12,
+      "concepts": ["process-management"],
+      "prerequisites": ["d5-parametrize-markers"],
+      "source_files": ["tests/conftest.py", "simulator/simulator.py"],
+      "requirements": ["REQ-REC-001"],
+      "blocks": [
+        {
+          "type": "learn",
+          "id": "learn",
+          "text": "`subprocess.Popen` returns immediately: the child is already running and you hold a **handle** to it. The lifecycle calls each answer one question:\n\n- `p.poll()` — is it dead yet? Returns `None` while alive, else the exit code. Never blocks.\n- `p.terminate()` — ask it to die (SIGTERM; `TerminateProcess` on Windows). Returns immediately; the child may still be exiting.\n- `p.wait(timeout=5)` — block until it exits and **reap** it; raises `TimeoutExpired` if it outlives the deadline.\n- `p.kill()` — SIGKILL, the uncatchable last resort after terminate is ignored.\n\nAlways pass an **argv list**, never a shell string: `shell=True` splits on whitespace and injects a shell you now have to kill too.",
+          "more": "Reaping matters: until wait() (or an internal poll) collects the exit status, a dead child lingers as a zombie on POSIX. Popen objects also reaped only via __del__ trigger ResourceWarning. The conftest pattern — terminate, wait with timeout, kill on TimeoutExpired, wait again — is the standard escalation ladder: graceful first, forced second, never skip the second wait because kill() is also asynchronous. On Windows there is no signal semantics: terminate() and kill() both call TerminateProcess, so the distinction is portable habit, not platform behavior. shell=True also breaks port passing (string interpolation), makes Ctrl+C hit the shell instead of your DUT, and turns any interpolated value into an injection surface."
+        },
+        {
+          "type": "predict",
+          "id": "predict",
+          "question": "`p.terminate()` has just returned. What does `p.poll()` return at that instant?",
+          "options": [
+            "The child's exit code — terminate() waits for death",
+            "None or an exit code — terminate() only sends the signal, the child may still be shutting down",
+            "0 — a terminated process always exits cleanly",
+            "It raises TimeoutExpired"
+          ],
+          "answer_index": 1,
+          "reveal": "terminate() is a request, not an outcome. The child needs some scheduler time to actually die, so poll() right after can still be None. That is why every correct teardown pairs terminate() with wait(timeout=...): wait() blocks until the exit is real and reaps the process. The check below shows both halves."
+        },
+        {
+          "type": "do",
+          "id": "do",
+          "instructions": "Drive the lifecycle by hand in a REPL (activate `.venv` first). Grab a free port, spawn the DUT, and walk it through alive -> terminated -> reaped:\n\n```import socket, subprocess, sys\nfrom testlab.client import LabClient\ns = socket.socket(); s.bind(('127.0.0.1', 0)); port = s.getsockname()[1]; s.close()\np = subprocess.Popen([sys.executable, '-m', 'simulator.simulator', '--port', str(port)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\nc = LabClient('127.0.0.1', port); c.wait_until_ready(deadline_seconds=5.0); c.close()\nprint(p.poll())            # None — alive\np.terminate()\nprint(p.wait(timeout=5))   # exit code — blocks until reaped\nprint(p.poll())            # same code — death is now visible to poll\n```\n\nThen rerun with a bogus flag (`'--port', '70000'`) and watch poll() report a nonzero exit within a second — a DUT that dies at startup is indistinguishable from a slow one until you poll.",
+          "command": ".venv\\Scripts\\python"
+        },
+        {
+          "type": "verify",
+          "id": "verify",
+          "validator": "python_probe",
+          "mandatory": true,
+          "description": "Spawns the real simulator as a child process, waits for TCP readiness, then terminates and reaps it — printing poll() before and after so the None -> exit-code transition is observable.",
+          "args": {
+            "snippet": "import socket, subprocess, sys\nfrom testlab.client import LabClient\ns = socket.socket(); s.bind(('127.0.0.1', 0)); port = s.getsockname()[1]; s.close()\np = subprocess.Popen([sys.executable, '-m', 'simulator.simulator', '--port', str(port)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\ntry:\n    c = LabClient('127.0.0.1', port)\n    c.wait_until_ready(deadline_seconds=5.0)\n    c.close()\n    print(p.poll())\n    p.terminate()\n    print(p.wait(timeout=5))\n    print(p.poll())\nfinally:\n    if p.poll() is None:\n        p.kill()\n        p.wait(timeout=5)",
+            "expect_stdout_regex": "None\\n",
+            "timeout_seconds": 15,
+            "success_note": "poll() returned None while the DUT served requests, then terminate()+wait() reaped it and poll() reported the exit code. Full lifecycle, no orphan."
+          }
+        },
+        {
+          "type": "explain",
+          "id": "explain",
+          "question": "In your own words: why is `p.terminate()` alone never a sufficient teardown, and what does the following `p.wait(timeout=...)` actually accomplish?",
+          "keywords": ["wait", "reap", "signal", "asynchronous", "exit code"],
+          "sample_answer": "terminate() only delivers the signal and returns — the process may still be mid-shutdown, so the port and PID are still held. wait(timeout=...) blocks until the child actually exits, collects its exit status (reaping it, so no zombie), and gives you the exit code; the timeout bounds how long teardown can hang before you escalate to kill()."
+        }
+      ],
+      "hints": [
+        { "level": 1, "text": "Separate the calls into two groups: the ones that ASK (terminate, kill) and the ones that CONFIRM (wait, poll)." },
+        { "level": 2, "text": "Look at the finally block of the dut fixture in tests/conftest.py — it is the terminate/wait/kill/wait ladder from this lesson, with poll() as the guard." },
+        { "level": 3, "text": "Skeleton: spawn with an argv list and DEVNULL; LabClient(...).wait_until_ready(deadline_seconds=5.0); print(p.poll()); p.terminate(); print(p.wait(timeout=5)); print(p.poll()). Wrap in try/finally with p.kill() as the safety net." }
+      ]
+    },
+    {
+      "id": "d6-readiness-polling",
+      "title": "Readiness is a poll with a deadline, not a sleep",
+      "objective": "Read reserve_local_port() and wait_until_ready() and explain why the harness polls against a monotonic deadline instead of sleeping a fixed number of seconds.",
+      "estimated_minutes": 10,
+      "concepts": ["process-management", "timing"],
+      "prerequisites": ["d6-popen-lifecycle"],
+      "source_files": ["tests/conftest.py", "src/testlab/client.py"],
+      "requirements": ["REQ-PROTO-002"],
+      "blocks": [
+        {
+          "type": "learn",
+          "id": "learn",
+          "text": "Two helpers in this repo make DUT startup deterministic:\n\n- `reserve_local_port()` (tests/conftest.py): binds port **0**, asks the OS for a free ephemeral port, closes the socket, and returns the number. No hardcoded port, no collision with a neighbor's run.\n- `LabClient.wait_until_ready()` (src/testlab/client.py): loops `connect -> status request -> state == 'READY'?` every 50 ms until `time.monotonic() + deadline_seconds` passes, then raises `TimeoutError`.\n\nMonotonic, not wall clock: NTP steps and daylight-saving jumps cannot stretch or skip the deadline.",
+          "more": "The reservation has an inherent race: reserve_local_port() closes its socket before the DUT binds, so another process can steal the port in the gap. It is accepted deliberately — the alternative (passing the open socket to the child) is platform-specific plumbing, and the race window is microseconds on a loopback interface. When it does lose, the symptom is a DUT that fails readiness and a teardown that kills it — loud, not silent. The poll loop doubles as a health check: a DUT that bound the port but deadlocks before READY still fails the deadline, which a bare TCP-connect check would miss."
+        },
+        {
+          "type": "predict",
+          "id": "predict",
+          "question": "Why does the harness poll for readiness instead of `time.sleep(5)` after Popen?",
+          "options": [
+            "Polling is more polite to the CPU scheduler",
+            "A fixed sleep is simultaneously too slow (fast startups wait 5s anyway) and too fragile (slow startups fail after 5s anyway); polling proceeds at first readiness and only pays the full deadline on genuine failure",
+            "sleep() does not work in pytest fixtures",
+            "Polling keeps the DUT's socket buffer warm"
+          ],
+          "answer_index": 1,
+          "reveal": "A fixed sleep bakes the worst case into every run: 100 tests x 5 idle seconds is pure dead time, and on a loaded CI box 5 seconds still is not enough — flaky. The poll inverts the cost: typical startup pays ~100 ms (one or two iterations), and the 5-second deadline is reserved for the pathological case, where you WANT a loud TimeoutError instead of a confusing connection-refused later."
+        },
+        {
+          "type": "do",
+          "id": "do",
+          "instructions": "Read the two helpers end to end, then measure what the poll actually costs:\n\n1. Open `tests/conftest.py` lines 26-29 (`reserve_local_port`) and 64-66 (the readiness call inside the `dut` fixture).\n2. Open `src/testlab/client.py` and read `wait_until_ready` — note `time.monotonic()`, the 50 ms `poll_seconds`, and that each failed attempt closes the client before retrying.\n3. Time a real startup in a REPL:\n\n```import socket, subprocess, sys, time\nfrom testlab.client import LabClient\ns = socket.socket(); s.bind(('127.0.0.1', 0)); port = s.getsockname()[1]; s.close()\np = subprocess.Popen([sys.executable, '-m', 'simulator.simulator', '--port', str(port)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\nt0 = time.monotonic()\nc = LabClient('127.0.0.1', port); c.wait_until_ready(deadline_seconds=5.0); c.close()\nprint('ready in %.3fs' % (time.monotonic() - t0))\np.terminate(); p.wait(timeout=5)\n```\n\nCompare that number to the 5 seconds a fixed sleep would have cost — every test, every run.",
+          "command": ".venv\\Scripts\\python"
+        },
+        {
+          "type": "verify",
+          "id": "verify",
+          "validator": "pytest_check",
+          "mandatory": true,
+          "description": "Runs the protocol suite, whose dut fixture chains reserve_local_port() and wait_until_ready(). Green tests prove the readiness path works against the real DUT; the JUnit expectation proves the malformed-JSON test actually ran.",
+          "args": {
+            "nodeids": ["tests/test_protocol.py"],
+            "expect": "pass",
+            "junit_contains": ["test_malformed_json_is_rejected_without_stopping_dut"],
+            "success_note": "The session dut fixture reserved an ephemeral port, polled to READY, served the whole protocol file, and tore the DUT down — readiness polling under real load."
+          }
+        },
+        {
+          "type": "explain",
+          "id": "explain",
+          "question": "In your own words: why is a bounded poll (deadline + interval) preferable to a fixed sleep before the first request?",
+          "keywords": ["deadline", "poll"],
+          "sample_answer": "A poll proceeds the moment the DUT reports READY, so fast startups cost milliseconds instead of the full sleep, and the monotonic deadline still bounds the slow or hung case with a clear TimeoutError. A fixed sleep is always wrong: too long for the common case, too short for the pathological one."
+        }
+      ],
+      "hints": [
+        { "level": 1, "text": "Ask who pays the 5 seconds in each design: with sleep, everyone; with a poll, only the run that is genuinely broken." },
+        { "level": 2, "text": "Read wait_until_ready in src/testlab/client.py — the while condition is time.monotonic() < deadline, and each iteration is a full connect/status/close attempt." },
+        { "level": 3, "text": "The race in reserve_local_port: the port is free when checked, not when bound. The fix the repo accepts is failing loudly via the readiness deadline, not preventing the race." }
+      ]
+    },
+    {
+      "id": "d6-broken-cleanup-sandbox",
+      "title": "Sandbox: watch an orphan happen, then fix it",
+      "objective": "Deliberately leak a DUT process in a safe sandbox, observe how it is detected, and convert the leak into a clean shutdown — then explain why conftest puts teardown in finally.",
+      "estimated_minutes": 14,
+      "concepts": ["process-management", "pytest"],
+      "prerequisites": ["d6-readiness-polling"],
+      "source_files": ["tests/conftest.py"],
+      "requirements": ["REQ-REC-001"],
+      "blocks": [
+        {
+          "type": "learn",
+          "id": "learn",
+          "text": "A pytest process that exits without terminating its DUT leaves an **orphan**: the simulator keeps running, keeps holding its port, and keeps writing its log — invisible to the next run, which then fails readiness or talks to the wrong server. Orphans outlive the test session that created them; `ps` (or Task Manager) is the only place they show up.\n\nThe `dut` fixture's defense is structural: everything after `yield` sits in a `finally` block, so teardown runs on pass, on failure, and on KeyboardInterrupt — never skipped.",
+          "more": "Python gives fixtures the yield/finally contract precisely because test outcomes are unpredictable: an assertion two tests from now must not decide whether your process dies. The conftest ladder is terminate -> wait(5) -> kill on TimeoutExpired -> wait again, guarded by `if process.poll() is None` so an already-dead DUT skips the dance, and followed by a hard pytest.fail if the process STILL lives — a fixture that cannot kill its own DUT is itself a defect worth failing the run over. In this sandbox the validator itself plays the finally role: its snippet kills and reaps whatever it leaked, so nothing survives the exercise. On a real rig the equivalent failure mode is worse: an orphaned DUT attached to hardware keeps commanding it."
+        },
+        {
+          "type": "do",
+          "id": "do-leak",
+          "instructions": "Run the first check below (`v-orphan`). Its snippet spawns a real DUT, waits for readiness, and then — deliberately — does NOT terminate it, simulating a fixture whose author forgot teardown. It prints `ORPHAN_DETECTED pid=...` because `p.poll() is None` at the moment a real test session would have exited.\n\nThen look at how the leak was contained: the snippet's own `finally` block kills and reaps the orphan and prints `REAPED exit=...`. That finally is the validator's safety net — the thing the broken fixture was missing. Optionally confirm nothing survived: `Get-Process python*` in PowerShell (or `ps aux | grep simulator` in bash) should show no stray simulator once the check completes."
+        },
+        {
+          "type": "verify",
+          "id": "v-orphan",
+          "validator": "python_probe",
+          "mandatory": true,
+          "description": "Intentionally leaks a DUT: spawns it, confirms readiness, skips terminate, detects the still-alive process, then reaps it in a finally block so the sandbox leaves nothing behind.",
+          "args": {
+            "snippet": "import socket, subprocess, sys\nfrom testlab.client import LabClient\ns = socket.socket(); s.bind(('127.0.0.1', 0)); port = s.getsockname()[1]; s.close()\np = subprocess.Popen([sys.executable, '-m', 'simulator.simulator', '--port', str(port)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\ntry:\n    c = LabClient('127.0.0.1', port)\n    c.wait_until_ready(deadline_seconds=5.0)\n    c.close()\n    if p.poll() is None:\n        print('ORPHAN_DETECTED pid=%d' % p.pid)\nfinally:\n    p.kill()\n    p.wait()\n    print('REAPED exit=%s' % p.returncode)",
+            "expect_stdout_regex": "ORPHAN_DETECTED pid=\\d+\\nREAPED",
+            "timeout_seconds": 15,
+            "success_note": "The orphan was real — poll() was None with no terminate ever sent — and the finally block reaped it, exactly the role conftest's teardown plays. The validator cleaned up after the leak so your machine holds no stray DUT."
+          }
+        },
+        {
+          "type": "quiz",
+          "id": "quiz-fix",
+          "question": "In the leaked snippet's pattern, what single change converts the ORPHAN outcome into a clean shutdown?",
+          "options": [
+            "Wrap the Popen call in try/except TimeoutExpired",
+            "Call p.terminate() then p.wait(timeout=5) before checking p.poll()",
+            "Pass shell=True so the shell owns the child",
+            "Call p.poll() in a loop until it returns an exit code"
+          ],
+          "answer_index": 1,
+          "explanation": "terminate()+wait() is the graceful shutdown the leak skipped: the signal asks the DUT to exit, wait() blocks until it has and reaps it. After that pair, poll() returns the exit code instead of None — the 'shutdown=True' the next check asserts."
+        },
+        {
+          "type": "verify",
+          "id": "v-clean",
+          "validator": "python_probe",
+          "mandatory": true,
+          "description": "The same spawn-and-ready pattern as v-orphan, but with terminate()+wait() before the poll — proving the one-line fix produces a reaped process instead of an orphan.",
+          "args": {
+            "snippet": "import socket, subprocess, sys\nfrom testlab.client import LabClient\ns = socket.socket(); s.bind(('127.0.0.1', 0)); port = s.getsockname()[1]; s.close()\np = subprocess.Popen([sys.executable, '-m', 'simulator.simulator', '--port', str(port)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\nc = LabClient('127.0.0.1', port)\nc.wait_until_ready(deadline_seconds=5.0)\nc.close()\np.terminate()\np.wait(timeout=5)\nprint('CLEAN shutdown=%s' % (p.poll() is not None))",
+            "expect_stdout_regex": "CLEAN shutdown=True",
+            "timeout_seconds": 15,
+            "success_note": "poll() returned an exit code because terminate()+wait() ran before the check — the DUT shut down gracefully and nothing outlived the snippet."
+          }
+        },
+        {
+          "type": "explain",
+          "id": "explain",
+          "question": "Why does the real conftest.py put the terminate/kill ladder in a finally block after yield, rather than as plain code at the end of the fixture?",
+          "keywords": ["finally", "teardown", "always"],
+          "sample_answer": "A fixture's code after yield only runs if control returns there normally — a failing or erroring test still unwinds through the yield, and finally guarantees the teardown executes on every path: pass, fail, or interrupt. Plain trailing code could be skipped by an exception, leaking the DUT; finally makes cleanup unconditional."
+        }
+      ],
+      "hints": [
+        { "level": 1, "text": "The only difference between ORPHAN and CLEAN is whether a terminate happened before the poll. Everything else — spawn, readiness, DEVNULL — stays identical." },
+        { "level": 2, "text": "In tests/conftest.py, the dut fixture's finally block (after `yield running_dut`) is the pattern to imitate: poll guard, terminate, wait(timeout), kill on TimeoutExpired, wait again." },
+        { "level": 3, "text": "For the clean variant: after c.close(), add p.terminate() then p.wait(timeout=5), then print('CLEAN shutdown=%s' % (p.poll() is not None)). For the leak variant, the finally must be p.kill(); p.wait() — kill, not terminate, because nothing graceful was ever attempted." }
+      ]
+    }
+  ]
+}

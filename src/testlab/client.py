@@ -108,7 +108,7 @@ class LabClient:
         try:
             self._socket.sendall(encoded)
             line = self._reader.readline()
-        except (OSError, socket.timeout) as exc:
+        except (TimeoutError, OSError) as exc:
             raise LabCommunicationError(f"Request failed: {message!r}") from exc
 
         elapsed = time.monotonic() - started
@@ -118,9 +118,7 @@ class LabClient:
         try:
             payload = json.loads(line)
         except json.JSONDecodeError as exc:
-            raise LabCommunicationError(
-                f"DUT returned invalid JSON: {line!r}"
-            ) from exc
+            raise LabCommunicationError(f"DUT returned invalid JSON: {line!r}") from exc
 
         if not isinstance(payload, dict):
             raise LabCommunicationError(

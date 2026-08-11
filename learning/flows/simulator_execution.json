@@ -1,0 +1,77 @@
+{
+  "title": "Simulator execution path",
+  "stages": [
+    {
+      "name": "module execution",
+      "what": "Python loads `simulator/simulator.py` as a module — either by import (`__name__` is `simulator.simulator`) or by running it (`__name__` is `__main__`).",
+      "why": "One file must be safe to import (no side effects) and runnable as a program.",
+      "source": "simulator/simulator.py",
+      "concepts": "modules, imports, __name__",
+      "failures": "Top-level side effects would fire on every import — tests would hang waiting for a server they never asked for."
+    },
+    {
+      "name": "__main__ guard",
+      "what": "`if __name__ == \"__main__\": raise SystemExit(main())` runs only when the file is executed directly.",
+      "why": "Separates library behavior from program behavior; SystemExit converts main()'s int into the process exit code.",
+      "source": "simulator/simulator.py (bottom of file)",
+      "concepts": "__main__, SystemExit, exit codes",
+      "failures": "Without the guard the server would start on import; without SystemExit the exit code would always be 0."
+    },
+    {
+      "name": "main()",
+      "what": "Orchestrates startup: parse args, validate the port, configure logging, run the server, return an exit code.",
+      "why": "A small, testable orchestration function instead of top-level script code.",
+      "source": "simulator/simulator.py::main",
+      "concepts": "program structure, return codes",
+      "failures": "Invalid port raises SystemExit before any socket is opened — validation belongs before resource acquisition."
+    },
+    {
+      "name": "parse_args()",
+      "what": "argparse turns argv into a typed namespace: --host, --port (int), --log-file (Path), --verbose (flag).",
+      "why": "Declarative CLI with defaults, type conversion, and --help for free.",
+      "source": "simulator/simulator.py::parse_args",
+      "concepts": "argparse, defaults, type coercion",
+      "failures": "Non-integer --port fails here with exit code 2 before main() logic runs."
+    },
+    {
+      "name": "configure_logging()",
+      "what": "Builds a formatter (UTC timestamps) and attaches a console handler plus an optional file handler.",
+      "why": "Logs are evidence. In a lab, the DUT log is what you read when a test fails.",
+      "source": "simulator/simulator.py::configure_logging",
+      "concepts": "logging handlers, formatters, levels",
+      "failures": "basicConfig with force=True replaces prior handlers — in a test harness, duplicate handlers mean duplicate log lines."
+    },
+    {
+      "name": "run_server()",
+      "what": "Creates the ThreadingDutServer, installs SIGINT/SIGTERM handlers, logs dut_ready, then serve_forever().",
+      "why": "The server must shut down cleanly on signals — that is what lets the test harness terminate it without orphans.",
+      "source": "simulator/simulator.py::run_server",
+      "concepts": "signal handlers, serve_forever, graceful shutdown",
+      "failures": "shutdown() must be called from another thread; calling it in the signal handler's own serve thread would deadlock."
+    },
+    {
+      "name": "ThreadingDutServer",
+      "what": "A ThreadingTCPServer: each accepted connection gets its own handler thread; daemon_threads=True.",
+      "why": "Multiple concurrent clients must not block each other — the harness polls readiness while tests connect.",
+      "source": "simulator/simulator.py::ThreadingDutServer",
+      "concepts": "threads, daemon threads, allow_reuse_address",
+      "failures": "Without allow_reuse_address, a quick restart hits 'address already in use' during TIME_WAIT."
+    },
+    {
+      "name": "handle()",
+      "what": "Reads newline-delimited requests from rfile, decodes UTF-8, JSON-parses, dispatches, writes the response line.",
+      "why": "TCP is a byte stream, not messages — the newline framing is the protocol's message boundary.",
+      "source": "simulator/simulator.py::DutRequestHandler.handle",
+      "concepts": "streams, framing, readline, encoding",
+      "failures": "A client that never sends '\\n' leaves readline() blocked; partial JSON yields INVALID_JSON."
+    },
+    {
+      "name": "build_response()",
+      "what": "Pure function: request dict → response dict. Validates type, command presence, known commands.",
+      "why": "Pure logic is unit-testable without sockets; every error path returns a structured error_code.",
+      "source": "simulator/simulator.py::build_response",
+      "concepts": "protocol design, validation, error codes",
+      "failures": "An exception here would kill the handler thread and drop the connection — that is why parsing errors are caught one level up."
+    }
+  ]
+}

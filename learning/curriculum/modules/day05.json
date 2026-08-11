@@ -1,0 +1,230 @@
+{
+  "lessons": [
+    {
+      "id": "d5-discovery-assertions",
+      "title": "Discovery rules and reading a failure report",
+      "objective": "Know exactly which files and functions pytest collects, and read an assertion-introspection failure diff fluently.",
+      "estimated_minutes": 12,
+      "status": "available",
+      "concepts": ["pytest", "failure-diagnosis"],
+      "prerequisites": ["d4-diagnose-comm-failure"],
+      "source_files": ["tests/test_status.py", "pyproject.toml"],
+      "requirements": ["REQ-COM-001"],
+      "blocks": [
+        {
+          "type": "learn",
+          "id": "learn",
+          "text": "pytest collects by **convention**, not registration. `testpaths = [\"tests\"]` in `pyproject.toml` says where to look; inside, a file must match `test_*.py` and a function must be named `test_*` to become a test. Everything else is ignored silently.\n\nOn a failed `assert`, pytest's **assertion introspection** rewrites the bytecode so the report shows the compared values and a diff — that is why `assert response.payload == {...}` prints both dicts instead of a bare `AssertionError`.\n\n`conftest.py` is scoped to its directory tree: fixtures in `tests/conftest.py` exist only for tests under `tests/`.",
+          "more": "Collection order is alphabetical by directory then file, and within a file, top to bottom. `-v` prints one line per collected test as `path::test_name PASSED/FAILED`; the short test summary (`-ra`, already in addopts) recaps non-passing tests at the bottom. Assertion rewriting only applies to test modules and conftest plugins pytest imports itself — helper modules imported normally keep plain asserts, which is one reason helpers should return values and let the test function assert. Renaming `test_status.py` to `status_check.py` or moving it out of `tests/` makes it vanish from the run with no error — the most common 'pytest isn't running my test' cause."
+        },
+        {
+          "type": "predict",
+          "id": "predict",
+          "question": "You copy a test file to `checks/test_ready_probe.py` at the repo root and run bare `pytest`. What happens to it?",
+          "options": [
+            "It is collected because the name matches test_*.py",
+            "It is collected because pytest scans the whole repo",
+            "It is skipped — testpaths limits collection to tests/",
+            "pytest errors because the file is outside tests/"
+          ],
+          "answer_index": 2,
+          "reveal": "`testpaths = [\"tests\"]` restricts default collection to the `tests/` directory, so the file is silently ignored — no error, no warning. It only runs if you pass its path explicitly. Silent skipping is why discovery rules are worth knowing cold."
+        },
+        {
+          "type": "do",
+          "id": "do",
+          "instructions": "First, see a clean verbose run:\n\n```pytest -v\n```\n\nNote the node IDs (`tests/test_status.py::test_status_request_returns_ready`) and the summary line. Now produce a **deliberate** failure in a scratch copy that lives outside the repo's tracked files (evidence/ is gitignored):\n\n```New-Item -ItemType Directory -Force evidence\\exercises\nCopy-Item tests\\test_status.py evidence\\exercises\\test_status_broken.py\nCopy-Item tests\\conftest.py evidence\\exercises\\conftest.py\n```\n\n(bash: `mkdir -p evidence/exercises && cp tests/test_status.py tests/conftest.py evidence/exercises/ && mv evidence/exercises/test_status.py evidence/exercises/test_status_broken.py`)\n\nThe conftest copy is required — fixtures are scoped to their directory tree, so `lab_client` does not exist under `evidence/exercises/` without it. Edit `evidence\\exercises\\test_status_broken.py`: in `test_status_request_returns_ready`, change `\"READY\"` to `\"NOTREADY\"`. Then run it and read the diff carefully:\n\n```pytest -v evidence\\exercises\\test_status_broken.py\n```\n\nFind the `assert` line, the `-`/`+` dict diff showing expected NOTREADY vs actual READY, and the `1 failed, 1 passed` summary.",
+          "command": "pytest -v evidence\\exercises\\test_status_broken.py"
+        },
+        {
+          "type": "verify",
+          "id": "verify",
+          "mandatory": true,
+          "validator": "pytest_check",
+          "description": "Runs your deliberately broken copy. This check PASSES only when the test FAILS — the failure, and its introspection diff, are the intended artifact.",
+          "args": {
+            "nodeids": ["evidence/exercises/test_status_broken.py"],
+            "expect": "fail",
+            "junit_contains": ["test_status_request_returns_ready"],
+            "expect_stdout_regex": "NOTREADY",
+            "success_note": "The broken assertion failed exactly as designed, and the report contains the NOTREADY diff — you produced and read a real failure signature."
+          }
+        },
+        {
+          "type": "quiz",
+          "id": "quiz",
+          "question": "In the failure diff, why can pytest show the full contents of both dicts instead of just 'assert False'?",
+          "options": [
+            "The DUT logs both values to dut.log",
+            "pytest rewrites assert bytecode in test modules to capture the compared values",
+            "LabClient stores every payload in a global registry",
+            "The -v flag re-runs the test with tracing enabled"
+          ],
+          "answer_index": 1,
+          "explanation": "Assertion introspection is an import-time bytecode rewrite of test modules. The rewritten assert records the operands, so a failure report can render the actual vs expected values and a diff — no logging or tracing involved."
+        },
+        {
+          "type": "explain",
+          "id": "explain",
+          "question": "A teammate says their new test file 'isn't being run' and there is no error. Name the two discovery rules you would check first, and why the failure is silent.",
+          "keywords": ["test_", "tests/", "testpaths", "convention"],
+          "sample_answer": "Check that the file is under the testpaths directory (tests/) and that both the file (test_*.py) and functions (test_*) match the naming conventions. Collection is by convention, so a mismatch means the file is simply never collected — there is nothing to error on."
+        }
+      ],
+      "hints": [
+        { "level": 1, "text": "The failure is the goal of the exercise. If pytest exits 0 on the broken copy, you have NOT done it — find out why the diff never happened." },
+        { "level": 2, "text": "If you see 'fixture lab_client not found' instead of an assertion diff, you skipped the conftest.py copy — fixtures only exist in the directory tree that defines them." },
+        { "level": 3, "text": "The edit is one word in evidence/exercises/test_status_broken.py: the expected dict in test_status_request_returns_ready should say 'NOTREADY' where the original says 'READY'. The DUT still answers READY; the mismatch is the lesson." }
+      ]
+    },
+    {
+      "id": "d5-fixtures-injection",
+      "title": "Fixtures: dependency injection and scope",
+      "objective": "Explain how pytest injects fixtures by parameter name, and why the DUT is session-scoped while the client is function-scoped.",
+      "estimated_minutes": 12,
+      "status": "available",
+      "concepts": ["pytest", "process-management"],
+      "prerequisites": ["d5-discovery-assertions"],
+      "source_files": ["tests/conftest.py", "tests/test_cleanup.py", "tests/test_status.py"],
+      "requirements": ["REQ-REC-001", "REQ-COM-001"],
+      "blocks": [
+        {
+          "type": "learn",
+          "id": "learn",
+          "text": "A test never calls a fixture. It **declares a parameter**, and pytest matches the parameter name to a registered fixture, builds it, and passes the value in. `def test_x(lab_client: LabClient)` is a dependency injection request.\n\nFixtures compose: `lab_client` declares `dut` as a parameter, so requesting `lab_client` transitively builds `dut`.\n\n**Scope** controls lifetime: `dut` is `scope=\"session\"` (built once per run), `lab_client` is function-scoped (fresh TCP connection per test). `yield` fixtures run teardown code after the yield — `dut` terminates the process at session end.",
+          "more": "Scope choices are cost/isolation trade-offs. Spawning a process per test (function scope) would make the 6-test suite start 6 simulators — slow and port-hungry, with no extra isolation since the DUT is stateless between requests. The client connection, by contrast, is cheap and stateful (the simulator logs client_disconnected, and a stale socket could mask a hang), so per-test is correct. `dut` also performs readiness polling before yielding and hard cleanup after — fixture teardown is where resource guarantees live, which is why the suite can survive a hung test without leaking a simulator process. `test_cleanup.py::test_dut_process_is_running_during_session` asserts mid-session that the process handle is still alive — evidence about the harness itself."
+        },
+        {
+          "type": "predict",
+          "id": "predict",
+          "question": "The full suite has 6 tests across 3 files, and 4 of them request lab_client. How many simulator processes start during one `pytest` run?",
+          "options": ["6 — one per test", "4 — one per lab_client request", "3 — one per file", "1 — session scope builds dut once"],
+          "answer_index": 3,
+          "reveal": "`dut` is declared `@pytest.fixture(scope=\"session\")`: the first request builds it (spawn + readiness poll), every later request reuses the same RunningDut, and teardown kills the process once at session end. lab_client being function-scoped only means a new TCP connection per test — to the same process."
+        },
+        {
+          "type": "do",
+          "id": "do",
+          "instructions": "Watch fixture setup/teardown happen by scope. Run:\n\n```pytest -v --setup-show tests\n```\n\n(bash identical). In the output, find `SETUP S dut` appearing exactly **once** before the first test, `SETUP F lab_client` appearing before **every** test that requests it, and the matching `TEARDOWN` lines — `TEARDOWN S dut` only after the last test.\n\nThen open `tests/conftest.py` and trace the chain: `lab_client` requests `dut`; `dut` requests `evidence_dir`; `evidence_dir` reads the `EVIDENCE_DIR` env var (this is how CI sandboxes the evidence tree). Finally run the two files that prove process state and protocol behavior agree:\n\n```pytest -v tests\\test_cleanup.py tests\\test_status.py\n```",
+          "command": "pytest -v --setup-show tests"
+        },
+        {
+          "type": "verify",
+          "id": "verify",
+          "mandatory": true,
+          "validator": "pytest_check",
+          "description": "Runs the process-state test and the status tests together: the session-scoped DUT must be alive mid-session and answer status requests within the same run.",
+          "args": {
+            "nodeids": ["tests/test_cleanup.py", "tests/test_status.py"],
+            "expect": "pass",
+            "junit_contains": ["test_dut_process_is_running_during_session", "test_status_request_returns_ready"],
+            "expect_stdout_regex": "3 passed",
+            "success_note": "One session-scoped DUT served all three tests: the process was provably alive during the session and answered both status assertions."
+          }
+        },
+        {
+          "type": "quiz",
+          "id": "quiz",
+          "question": "Why is making `dut` session-scoped safe here, rather than a test-isolation bug?",
+          "options": [
+            "pytest restarts crashed fixtures automatically",
+            "The DUT is stateless across requests, so sharing the process leaks nothing between tests",
+            "Session scope runs tests in parallel to save time",
+            "lab_client reconnects, which resets the simulator's memory"
+          ],
+          "answer_index": 1,
+          "explanation": "Session scope shares one process across all tests; that is only sound when the resource carries no per-test state. The simulator answers each request independently (verified by test_protocol.py follow-ups), so the savings — one spawn instead of six — cost no isolation."
+        },
+        {
+          "type": "explain",
+          "id": "explain",
+          "question": "In your own words: how does a value produced by the `dut` fixture end up inside a test that never mentions `dut` at all?",
+          "keywords": ["parameter", "inject", "depend", "lab_client"],
+          "sample_answer": "pytest resolves fixtures transitively by parameter name: the test asks for lab_client, lab_client declares dut as its own parameter, so pytest builds dut first and injects it into lab_client, which injects the client into the test. The dependency chain is driven entirely by parameter names."
+        }
+      ],
+      "hints": [
+        { "level": 1, "text": "Nobody calls these functions. The mechanism is name matching: a parameter named X requests the fixture named X." },
+        { "level": 2, "text": "Read the decorators in tests/conftest.py: scope='session' on dut, default (function) scope on lab_client — then look at lab_client's parameter list to see the chaining." },
+        { "level": 3, "text": "Run `pytest --setup-show tests` and count the letters: 'S' setups happen once per session, 'F' setups once per test function. One S for dut, many F for lab_client." }
+      ]
+    },
+    {
+      "id": "d5-parametrize-markers",
+      "title": "parametrize and markers: one function, many cases",
+      "objective": "Write a parametrized pure-unit test of build_response() error paths, with each case traced to REQ-PROTO-001 via a registered marker.",
+      "estimated_minutes": 15,
+      "status": "available",
+      "concepts": ["pytest", "protocol-design"],
+      "prerequisites": ["d5-fixtures-injection"],
+      "source_files": ["simulator/simulator.py", "tests/test_protocol.py", "pyproject.toml"],
+      "requirements": ["REQ-PROTO-001"],
+      "blocks": [
+        {
+          "type": "learn",
+          "id": "learn",
+          "text": "`@pytest.mark.parametrize` turns one test function into **N independently reported cases**: each parameter set gets its own node ID (`test_x[case-id]`), its own pass/fail, its own JUnit testcase. One failing case does not hide the others.\n\n`@pytest.mark.requirement(\"REQ-PROTO-001\")` attaches metadata. The marker must be **registered** — `pyproject.toml` declares it under `markers = [...]` and addopts carries `--strict-markers`, so a typo'd marker is a hard error, not a silent no-op. `pytest.param(..., marks=..., id=...)` attaches a marker and a readable ID to a single parameter set.\n\n`build_response()` is pure — no socket, no fixture — so these cases need no DUT.",
+          "more": "Parametrize arguments map positionally to the function's parameter names: `@pytest.mark.parametrize((\"message\", \"expected_error\"), [...])` fills `def test_x(message, expected_error)`. Always give explicit `id=` strings (or pytest derives ugly ones from reprs) — the IDs appear in node IDs, verbose output, and JUnit names, i.e. in your evidence. The requirement marker is what the traceability CSV keys on: `requirements/traceability.csv` links REQ-PROTO-001 to test node IDs, so a marker that does not survive collection breaks the audit chain. `--strict-markers` exists precisely because an unregistered marker name fails silently without it — in a requirements-evidence context, silent is unacceptable."
+        },
+        {
+          "type": "predict",
+          "id": "predict",
+          "question": "A function decorated with `@pytest.mark.parametrize` over 3 parameter sets is collected. How many lines does `pytest -v` print for it, and what happens if case 2 fails?",
+          "options": [
+            "1 line; the whole function is marked failed",
+            "3 lines; cases 1 and 3 still run and report independently",
+            "3 lines; pytest stops after case 2 fails",
+            "1 line; parametrize only affects JUnit output"
+          ],
+          "answer_index": 1,
+          "reveal": "Each parameter set is a separate collected item with its own node ID (test_x[list-input], etc.), so -v prints 3 lines and each case reports independently — a failure in one case neither skips nor masks the others. That independence is exactly why error-path matrices belong in parametrize."
+        },
+        {
+          "type": "do",
+          "id": "do",
+          "instructions": "Create `tests/test_build_response.py` — a pure-unit test of the three error branches in `simulator/simulator.py::build_response`, one parametrized function, every case marked REQ-PROTO-001:\n\n- a **list** input (not a dict) → `error_code` `INVALID_MESSAGE_TYPE`\n- `{\"sequence\": 1}` (no command key) → `MISSING_COMMAND`\n- `{\"command\": \"selfdestruct\", \"sequence\": 2}` → `UNSUPPORTED_COMMAND`\n\nUse `@pytest.mark.parametrize((\"message\", \"expected_error\"), [...])` with three `pytest.param(...)` entries, each carrying `marks=pytest.mark.requirement(\"REQ-PROTO-001\")` and a readable `id=`. Assert `response[\"status\"] == \"error\"` and `response[\"error_code\"] == expected_error`.\n\nThen run it verbose and confirm three separate node IDs, all passing:\n\n```pytest -v tests\\test_build_response.py\n```\n\nAlso run `pytest --markers` and find the registered `requirement` marker in the list — that registration is what makes `--strict-markers` accept your file.",
+          "command": "pytest -v tests\\test_build_response.py"
+        },
+        {
+          "type": "verify",
+          "id": "verify-source",
+          "mandatory": true,
+          "validator": "source_check",
+          "description": "Checks that your new test file actually uses parametrize and traces its cases to REQ-PROTO-001.",
+          "args": {
+            "file": "tests/test_build_response.py",
+            "must_contain": ["parametrize"],
+            "must_have_requirement_marker": "REQ-PROTO-001",
+            "success_note": "tests/test_build_response.py parametrizes its cases and carries the REQ-PROTO-001 marker — traceable by construction."
+          }
+        },
+        {
+          "type": "verify",
+          "id": "verify-run",
+          "mandatory": true,
+          "validator": "pytest_check",
+          "description": "Runs your parametrized test: all three error-path cases must pass against the real build_response().",
+          "args": {
+            "nodeids": ["tests/test_build_response.py"],
+            "expect": "pass",
+            "junit_contains": ["test_build_response"],
+            "success_note": "All parametrized cases passed and each was recorded as its own JUnit testcase — the error matrix is now executable evidence for REQ-PROTO-001."
+          }
+        },
+        {
+          "type": "explain",
+          "id": "explain",
+          "question": "Why pair --strict-markers with a requirements-evidence workflow — what specific failure does it prevent?",
+          "keywords": ["typo", "silent", "registered", "traceability"],
+          "sample_answer": "Without --strict-markers, a misspelled or unregistered marker is silently accepted, so a test could lose its requirement link without anyone noticing and the traceability evidence would quietly go stale. Strict markers turn that silent gap into a collection error, because every marker must be registered in pyproject.toml."
+        }
+      ],
+      "hints": [
+        { "level": 1, "text": "One function, three rows of data. The marker goes on each row via pytest.param, not on the function — look at how tests/test_protocol.py uses the requirement marker for style." },
+        { "level": 2, "text": "Signature shape: @pytest.mark.parametrize(('message', 'expected_error'), [pytest.param(<input>, '<ERROR_CODE>', marks=pytest.mark.requirement('REQ-PROTO-001'), id='...'), ...]) over def test_build_response_error_cases(message, expected_error). Import build_response from simulator.simulator." },
+        { "level": 3, "text": "The three parameter rows: (['status'], 'INVALID_MESSAGE_TYPE', id='list-input'), ({'sequence': 1}, 'MISSING_COMMAND', id='missing-command'), ({'command': 'selfdestruct', 'sequence': 2}, 'UNSUPPORTED_COMMAND', id='unsupported-command'). Body: response = build_response(message); assert response['status'] == 'error'; assert response['error_code'] == expected_error." },
+        { "level": 4, "text": "Full file:\n```\"\"\"Pure-unit tests for build_response() error paths — no DUT required.\"\"\"\n\nfrom __future__ import annotations\n\nimport pytest\n\nfrom simulator.simulator import build_response\n\n\n@pytest.mark.parametrize(\n    ('message', 'expected_error'),\n    [\n        pytest.param(['status'], 'INVALID_MESSAGE_TYPE', marks=pytest.mark.requirement('REQ-PROTO-001'), id='list-input'),\n        pytest.param({'sequence': 1}, 'MISSING_COMMAND', marks=pytest.mark.requirement('REQ-PROTO-001'), id='missing-command'),\n        pytest.param({'command': 'selfdestruct', 'sequence': 2}, 'UNSUPPORTED_COMMAND', marks=pytest.mark.requirement('REQ-PROTO-001'), id='unsupported-command'),\n    ],\n)\ndef test_build_response_error_cases(message: object, expected_error: str) -> None:\n    response = build_response(message)\n    assert response['status'] == 'error'\n    assert response['error_code'] == expected_error\n```" }
+      ]
+    }
+  ]
+}
