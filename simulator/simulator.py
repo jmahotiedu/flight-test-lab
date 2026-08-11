@@ -127,6 +127,15 @@ def resolve_fault_config(args: argparse.Namespace) -> FaultConfig:
     # other.
     if delay < 0:
         raise SystemExit("--fault-delay-ms must not be negative")
+    # Zero is equally useless for the two timing presets: both runtime guards
+    # are `> 0`, so the fault would neither delay anything nor log
+    # fault_injected, and the run would look like a clean experiment that
+    # exercised a fault. Zero stays legal when no timing fault is requested.
+    if args.fault in ("delayed_response", "startup_delay") and delay == 0:
+        raise SystemExit(
+            f"--fault {args.fault} needs a positive --fault-delay-ms "
+            "(0 would disable the fault it requests)"
+        )
     presets = {
         "delayed_response": FaultConfig(response_delay_ms=delay),
         "dropped_connection": FaultConfig(drop_connection=True),

@@ -35,7 +35,13 @@ _ENV_OVERRIDES = {
     "cxx": "FTL_CXX",
     "gdb": "FTL_GDB",
     "ninja": "FTL_NINJA",
+    "make": "FTL_MAKE",
 }
+
+# Fallback build tools for Windows when Ninja is absent: without naming a
+# generator, CMake picks Visual Studio there even though the detected compiler
+# is g++.
+_MAKE_CANDIDATES = ("mingw32-make", "make")
 
 _CXX_CANDIDATES = ("g++", "clang++", "c++")
 
@@ -68,10 +74,11 @@ class Toolchain:
     ctest: str | None = None
     cxx: str | None = None
     gdb: str | None = None
-    # Optional: a single-config generator. Without it CMake falls back to its
+    # Optional build tools. Without one of these CMake falls back to its
     # platform default, which on Windows is Visual Studio — a build GDB cannot
     # read symbols from.
     ninja: str | None = None
+    make: str | None = None
 
     @property
     def can_build_cpp(self) -> bool:
@@ -125,12 +132,23 @@ def detect_toolchain() -> Toolchain:
             return override
         return _find(name)
 
+    def resolve_make() -> str | None:
+        override = os.environ.get(_ENV_OVERRIDES["make"])
+        if override and Path(override).is_file():
+            return override
+        for candidate in _MAKE_CANDIDATES:
+            found = _find(candidate)
+            if found:
+                return found
+        return None
+
     return Toolchain(
         cmake=resolve("cmake"),
         ctest=resolve("ctest"),
         cxx=_detect_cxx(),
         gdb=resolve("gdb"),
         ninja=resolve("ninja"),
+        make=resolve_make(),
     )
 
 

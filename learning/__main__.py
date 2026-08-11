@@ -14,6 +14,7 @@ import argparse
 import webbrowser
 from pathlib import Path
 
+from learning.checks.common import terminate_active_validators
 from learning.server.app import build_server
 from learning.server.curriculum import CurriculumError
 
@@ -54,6 +55,13 @@ def main() -> int:
     except KeyboardInterrupt:
         print("\nstopped")
     finally:
+        # Handler threads are daemons and validator children run in their own
+        # process group, so without this a Ctrl+C during a long pytest, CMake
+        # or GDB check would leave that process — and any DUT it started —
+        # running after the UI said it stopped.
+        reaped = terminate_active_validators()
+        if reaped:
+            print(f"  reaped {reaped} running check(s)")
         server.server_close()
     return 0
 

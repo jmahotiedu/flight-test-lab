@@ -207,10 +207,16 @@
           "id": "v-requirement-declared",
           "validator": "artifact_check",
           "mandatory": true,
-          "description": "Checks that REQ-PROTO-003 is actually declared in the requirements register — a marker pointing at an ID that exists nowhere is a dangling reference, not traceability.",
+          "description": "Checks that REQ-PROTO-003 is declared as a complete row — title, shall-statement, verification method and acceptance criteria. An ID with empty columns is a placeholder, not a requirement.",
           "args": {
             "file": "requirements/software_requirements.csv",
-            "csv_row": { "requirement_id": "REQ-PROTO-003" },
+            "csv_row_matches": {
+              "requirement_id": "^REQ-PROTO-003$",
+              "title": "\\S",
+              "requirement": "(?i)shall",
+              "verification_method": "\\S",
+              "acceptance_criteria": "\\S"
+            },
             "success_note": "REQ-PROTO-003 is a declared requirement, so the marker on your test points at something real."
           }
         },

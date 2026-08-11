@@ -124,6 +124,30 @@ def test_every_lesson_gates_on_real_work(curriculum: Curriculum) -> None:
         assert gates > 0, f"{lesson.id} can be completed by clicking through"
 
 
+def test_no_lesson_authors_a_timeout_the_runner_would_shorten(
+    curriculum: Curriculum,
+) -> None:
+    """A clamped timeout is a lie: the lesson allows time the runner refuses.
+
+    A build or full parity run on a slow machine would then be killed early
+    and the mandatory check becomes unpassable through no fault of the
+    learner's.
+    """
+    from learning.server.validators import MAX_TIMEOUT_SECONDS
+
+    for lesson in curriculum.lessons.values():
+        for block in lesson.blocks:
+            if block["type"] != "verify":
+                continue
+            authored = block.get("args", {}).get("timeout_seconds")
+            if authored is None:
+                continue
+            assert float(authored) <= MAX_TIMEOUT_SECONDS, (
+                f"{lesson.id}:{block['id']} asks for {authored}s but the runner "
+                f"caps at {MAX_TIMEOUT_SECONDS}s"
+            )
+
+
 def test_interview_questions_cover_core_concepts(curriculum: Curriculum) -> None:
     assert len(curriculum.interview) >= 20
     covered = {concept for q in curriculum.interview for concept in q.concepts}

@@ -52,9 +52,10 @@
             "file": "requirements/traceability.csv",
             "csv_row": {
               "requirement_id": "REQ-COM-002",
-              "test_case": "tests/test_status.py::test_status_response_meets_250_ms_deadline"
+              "test_case": "tests/test_status.py::test_status_response_meets_250_ms_deadline",
+              "evidence": "evidence/junit/test-results.xml"
             },
-            "success_note": "The REQ-COM-002 chain is intact: requirement row, marked test, traceability row pointing at the JUnit evidence."
+            "success_note": "The REQ-COM-002 chain is intact end to end: requirement row, marked test, and a traceability row naming the JUnit evidence file — all three columns, in one row."
           }
         },
         {
@@ -117,10 +118,16 @@
           "id": "v-csv",
           "validator": "artifact_check",
           "mandatory": true,
-          "description": "Checks the new requirement was declared in software_requirements.csv.",
+          "description": "Checks the new requirement was declared as a complete row — an ID with empty columns would be a placeholder, and the success note below would be a lie.",
           "args": {
             "file": "requirements/software_requirements.csv",
-            "csv_row": { "requirement_id": "REQ-LEARN-001" },
+            "csv_row_matches": {
+              "requirement_id": "^REQ-LEARN-001$",
+              "title": "\\S",
+              "requirement": "(?i)shall",
+              "verification_method": "\\S",
+              "acceptance_criteria": "\\S"
+            },
             "success_note": "REQ-LEARN-001 is declared with title, shall-statement, method, and acceptance criteria."
           }
         },

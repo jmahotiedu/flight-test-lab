@@ -16,7 +16,11 @@ from typing import Any
 
 MAX_OUTPUT_CHARS = 4000
 DEFAULT_TIMEOUT_SECONDS = 30.0
-MAX_TIMEOUT_SECONDS = 120.0
+# The ceiling has to be at least the largest timeout any lesson authors, or
+# clamp_timeout silently shortens it and a slow machine fails a check the
+# curriculum explicitly allowed time for.  tests/learning/test_curriculum.py
+# asserts no lesson exceeds this.
+MAX_TIMEOUT_SECONDS = 300.0
 
 
 @dataclass(frozen=True, slots=True)

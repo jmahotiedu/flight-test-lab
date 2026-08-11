@@ -19,17 +19,25 @@
     },
     {
       "name": "install",
-      "what": "pip install -e '.[dev]' with pip caching keyed on the dependency files.",
-      "why": "The editable install is exactly what a new contributor does — CI tests the onboarding path too.",
-      "source": ".github/workflows/ci.yml (Install project)",
+      "what": "pip install -e '.[dev,cpp]' with pip caching, plus apt-get install gdb.",
+      "why": "The editable install is exactly what a new contributor does — CI tests the onboarding path too. The cpp extra brings CMake and Ninja from PyPI so the build system is pinned per checkout.",
+      "source": ".github/workflows/ci.yml (Install project / Install debugger)",
       "concepts": "packaging, caching",
       "failures": "A stale cache is a rare but real source of 'works locally, red in CI'."
     },
     {
+      "name": "native build",
+      "what": "cmake -S cpp -B cpp/build, cmake --build, then ctest -C Debug --output-junit into evidence/junit/.",
+      "why": "The C++ DUT is a second implementation of the same protocol, so it has to be built and unit-tested before anything drives it. On GitLab this is a separate `native` stage that installs its own compiler.",
+      "source": ".github/workflows/ci.yml (Build the C++ DUT / Run CTest); .gitlab-ci.yml (native stage)",
+      "concepts": "native builds, CTest",
+      "failures": "A compiler present locally but absent on the runner turns a green desk into a red pipeline — which is the point of running it here."
+    },
+    {
       "name": "quality gates",
-      "what": "ruff check → ruff format --check → mypy → pytest, each exiting nonzero on failure.",
-      "why": "The runner sees only exit codes; every tool's exit status is a contract.",
-      "source": ".github/workflows/ci.yml (Lint/Type check/Run tests)",
+      "what": "ruff check → ruff format --check → mypy → pytest → the protocol suite again with --dut cpp, each exiting nonzero on failure.",
+      "why": "The runner sees only exit codes; every tool's exit status is a contract. The final run proves the requirement tests hold against the native DUT too, not just the Python one.",
+      "source": ".github/workflows/ci.yml (Lint/Type check/Run tests/Run the protocol suite against the C++ DUT)",
       "concepts": "exit codes, gates",
       "failures": "Piping a command can hide its exit code — the pipeline's truth is the step's exit status."
     },

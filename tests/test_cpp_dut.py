@@ -16,6 +16,7 @@ import json
 import socket
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -276,6 +277,88 @@ def test_course_added_commands_do_not_diverge(
         f"the two DUTs disagree about {command!r}: the course adds it to the "
         f"Python DUT, so it has to be ported to cpp/ as well.\n"
         f"  python: {python_reply}\n  cpp:    {cpp_reply}"
+    )
+
+
+@pytest.mark.requirement("REQ-CPP-001")
+def test_ported_counter_is_safe_under_concurrency(cpp_dut: int) -> None:
+    """If counter was ported, it must survive concurrent clients.
+
+    The Day 11 porting lesson tells the learner the C++ counter needs a mutex
+    because the server is thread-per-connection. A single sequential request
+    cannot tell a locked implementation from an unlocked one — both answer 1
+    — so the gate would certify exactly the race the lesson warns about.
+    Skips when counter is not implemented, which is the shipped state.
+    """
+    probe = json.loads(_ask_raw(cpp_dut, '{"command": "counter", "sequence": 0}'))
+    if probe.get("error_code") == "UNSUPPORTED_COMMAND":
+        pytest.skip("counter is not implemented in the C++ DUT (Day 9 extension)")
+
+    # 1. Deterministic: the implementation must actually synchronise.
+    #
+    # This assertion carries the weight, because the behavioural one below
+    # cannot. Measured against a deliberately unsynchronised `count = count +
+    # 1`, 16 concurrent clients detected the lost update in only 4 of 5 runs —
+    # a black-box race detector has false negatives by nature, and a gate that
+    # misses one time in five certifies the bug it exists to catch.
+    source = (REPO_ROOT / "cpp" / "src" / "protocol.cpp").read_text(
+        encoding="utf-8", errors="replace"
+    )
+    counter_region = source[source.find('"counter"') :][:1200]
+    assert any(
+        token in counter_region
+        for token in ("std::mutex", "lock_guard", "scoped_lock", "std::atomic")
+    ), (
+        "the C++ counter branch shows no synchronisation (no mutex, lock_guard "
+        "or atomic). The server is thread-per-connection, so an unguarded "
+        "read-modify-write is the race Day 9 taught you to find — this time in "
+        "a language with no GIL to hide it."
+    )
+
+    # 2. Behavioural, best effort: with real contention, a lost update shows up
+    #    as a duplicate count or a final value below the request total.
+    threads_count, per_thread = 16, 25
+    total = threads_count * per_thread
+    counts: list[int] = []
+    errors: list[BaseException] = []
+    lock = threading.Lock()
+    barrier = threading.Barrier(threads_count)
+
+    def hammer() -> None:
+        try:
+            barrier.wait(timeout=15)
+            local = [
+                json.loads(_ask_raw(cpp_dut, '{"command": "counter", "sequence": 1}'))[
+                    "count"
+                ]
+                for _ in range(per_thread)
+            ]
+            with lock:
+                counts.extend(local)
+        except BaseException as exc:  # noqa: BLE001 - reported below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=hammer) for _ in range(threads_count)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=60)
+
+    assert not errors, f"concurrent counter requests raised: {errors[:3]}"
+    assert len(counts) == total
+    # Assert the shape of the result, not absolute values: earlier tests (and
+    # the probe above) have already advanced the counter, so anchoring on a
+    # starting point would fail a correct implementation. N increments must
+    # yield N distinct values forming one contiguous run — a lost update
+    # shows up as a duplicate, which breaks both.
+    assert len(set(counts)) == total, (
+        f"{total} concurrent increments produced only {len(set(counts))} "
+        "distinct values — updates were lost, so the counter's "
+        "read-modify-write is not atomic"
+    )
+    assert max(counts) - min(counts) == total - 1, (
+        f"counts spanned {min(counts)}..{max(counts)} for {total} increments, "
+        "which is not a contiguous run — increments were interleaved or lost"
     )
 
 

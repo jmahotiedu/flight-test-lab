@@ -267,10 +267,21 @@ class ProgressStore:
 
     def lesson_completion(self, lesson: Lesson) -> tuple[bool, list[str]]:
         """Return (complete, list-of-missing-requirements) for a lesson."""
+        with self._lock:
+            return self._lesson_completion_locked(lesson)
+
+    def _lesson_completion_locked(self, lesson: Lesson) -> tuple[bool, list[str]]:
+        """Gate evaluation, with the caller already holding the lock.
+
+        mark_complete needs to evaluate the gates and write the status without
+        releasing the lock in between: otherwise a concurrent /api/validate
+        recording a mandatory failure lands in the gap, sees status
+        "in_progress" so skips revocation, and completion then writes
+        "complete" over a currently-failing lesson.
+        """
         if lesson.status == "unavailable":
             return False, ["lesson is unavailable"]
-        with self._lock:
-            record = self._state["lessons"].get(lesson.id)
+        record = self._state["lessons"].get(lesson.id)
         if record is None:
             missing = ["lesson not started"]
             return False, missing
@@ -289,10 +300,10 @@ class ProgressStore:
         return (not missing, missing)
 
     def mark_complete(self, lesson: Lesson) -> tuple[bool, list[str]]:
-        complete, missing = self.lesson_completion(lesson)
-        if not complete:
-            return False, missing
         with self._lock:
+            complete, missing = self._lesson_completion_locked(lesson)
+            if not complete:
+                return False, missing
             record = self._lesson_record_locked(lesson.id)
             record["status"] = "complete"
             record["completed_at"] = _now()

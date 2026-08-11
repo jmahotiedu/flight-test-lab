@@ -351,6 +351,11 @@ def load_curriculum(
         interview_raw.get("questions"), list
     ):
         _fail(interview_path, "must be an object with a 'questions' list")
+    if not interview_raw["questions"]:
+        # An empty bank loads fine and then makes the first /api/interview
+        # request raise IndexError inside random.choices — a broken mode
+        # discovered at runtime, which is exactly what loading loudly is for.
+        _fail(interview_path, "must define at least one interview question")
     interview: list[InterviewQuestion] = []
     seen_qids: set[str] = set()
     for raw_q in interview_raw["questions"]:

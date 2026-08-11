@@ -15,7 +15,7 @@
         {
           "type": "learn",
           "id": "learn",
-          "text": "Two files describe the same automation in two dialects.\n\n`.github/workflows/ci.yml` (GitHub Actions): `on:` triggers (push to `main`, every `pull_request`) → one job `quality-and-test` on `ubuntu-latest` with `timeout-minutes: 10` → sequential **steps**.\n\n`.gitlab-ci.yml` (GitLab): `default: image: python:3.12-bookworm` → **stages** (`quality`, `test`) → jobs grouped by stage.\n\nBoth end identically: everything under `evidence/` is uploaded **unconditionally** — `if: always()` on GitHub, `artifacts: when: always` on GitLab.",
+          "text": "Two files describe the same automation in two dialects.\n\n`.github/workflows/ci.yml` (GitHub Actions): `on:` triggers (push to `main`, every `pull_request`) → one job `quality-and-test` on `ubuntu-latest` with `timeout-minutes: 10` → sequential **steps**, which include building the C++ DUT and running CTest before the Python suite.\n\n`.gitlab-ci.yml` (GitLab): `default: image: python:3.12-bookworm` → **stages** (`quality`, `test`, `native`) → jobs grouped by stage. The `native` stage installs a compiler, builds `cpp/`, runs CTest, and re-runs the protocol suite against the native DUT.\n\nBoth end identically: everything under `evidence/` is uploaded **unconditionally** — `if: always()` on GitHub, `artifacts: when: always` on GitLab.",
           "more": "Anatomy worth memorizing: the trigger (`on:` / implicit) decides *when* the pipeline runs; the runner image (`runs-on: ubuntu-latest`, `image: python:3.12-bookworm`) decides *where*; `timeout-minutes: 10` bounds a hung job so a stuck test cannot burn runner hours forever. GitHub steps execute in order and a nonzero exit aborts the job — unless a step opts out with `if: always()`. GitLab's `artifacts:reports:junit` goes further than storage: GitLab parses `evidence/junit/test-results.xml` and renders per-test results in the merge-request UI. GitHub's `if-no-files-found: error` makes *missing* evidence itself a pipeline failure — silence is not allowed to pass."
         },
         {
@@ -117,12 +117,12 @@
           "id": "verify",
           "validator": "python_probe",
           "mandatory": true,
-          "description": "Runs the first gate (ruff check) in a subprocess from the repo root and requires the exit code to be 0 — the same contract CI enforces.",
+          "description": "Runs the whole gate chain — lint, formatting, types, tests — in subprocesses from the repo root and requires every one to exit 0. Checking only the first would certify a quarter of the exercise: these tools are independent, and a green ruff says nothing about formatting, types or behaviour.",
           "args": {
-            "snippet": "import subprocess, sys\nr = subprocess.run([sys.executable, '-m', 'ruff', 'check', 'src', 'simulator', 'tests', 'learning'], capture_output=True)\nprint('ruff exit:', r.returncode)",
-            "expect_stdout_regex": "ruff exit: 0",
-            "timeout_seconds": 60,
-            "success_note": "ruff check exits 0 on src, simulator, tests, and learning — the first gate is green locally, exactly as CI will run it."
+            "snippet": "import subprocess, sys\nPATHS = ['src', 'simulator', 'tests', 'learning']\ngates = [\n    ('ruff check', [sys.executable, '-m', 'ruff', 'check', *PATHS]),\n    ('ruff format', [sys.executable, '-m', 'ruff', 'format', '--check', *PATHS]),\n    ('mypy', [sys.executable, '-m', 'mypy', 'src', 'simulator', 'learning']),\n    ('pytest', [sys.executable, '-m', 'pytest', '-q']),\n]\nfor name, argv in gates:\n    result = subprocess.run(argv, capture_output=True, text=True)\n    print(f'{name} exit: {result.returncode}')\n    if result.returncode != 0:\n        print((result.stdout or '')[-1500:])\n        print((result.stderr or '')[-500:])\n",
+            "expect_stdout_regex": "ruff check exit: 0\\nruff format exit: 0\\nmypy exit: 0\\npytest exit: 0",
+            "timeout_seconds": 300,
+            "success_note": "All four gates exit 0 — lint, formatting, types and the full suite. That is the same chain CI runs, and it is green on your checkout."
           }
         },
         {

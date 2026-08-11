@@ -13,6 +13,7 @@ import contextlib
 import re
 import socket
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -289,8 +290,13 @@ def _configure_argv(cmake: str, context: ValidatorContext) -> list[str]:
 
     if toolchain.cxx:
         argv.append(f"-DCMAKE_CXX_COMPILER={toolchain.cxx}")
+    # Name a generator explicitly. Leaving it to CMake means Visual Studio on
+    # Windows even when the detected compiler is g++, and the resulting cache
+    # is one the very next check has to reject.
     if toolchain.ninja:
         argv += ["-G", "Ninja", f"-DCMAKE_MAKE_PROGRAM={toolchain.ninja}"]
+    elif sys.platform == "win32" and toolchain.make:
+        argv += ["-G", "MinGW Makefiles", f"-DCMAKE_MAKE_PROGRAM={toolchain.make}"]
     return argv
 
 

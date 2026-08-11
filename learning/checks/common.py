@@ -12,6 +12,7 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -29,6 +30,27 @@ if sys.platform == "win32":
 else:
     CREATION_FLAGS = 0
     START_NEW_SESSION = True
+
+
+# Every validator subprocess currently running, so shutdown can reap them.
+# Handler threads are daemons and their children live in their own process
+# group, so Ctrl+C would otherwise let the learning server exit while a pytest
+# run, a CMake build or a DUT it started keeps going — holding ports and
+# writing logs after the UI said it stopped.
+_ACTIVE: set[subprocess.Popen[str]] = set()
+_ACTIVE_LOCK = threading.Lock()
+
+
+def terminate_active_validators() -> int:
+    """Kill every running validator process tree. Returns how many were live."""
+    with _ACTIVE_LOCK:
+        processes = list(_ACTIVE)
+    reaped = 0
+    for process in processes:
+        if process.poll() is None:
+            kill_process_tree(process)
+            reaped += 1
+    return reaped
 
 
 def kill_process_tree(process: subprocess.Popen[str]) -> None:
@@ -80,16 +102,22 @@ def run_subprocess(
         creationflags=CREATION_FLAGS,
         start_new_session=START_NEW_SESSION,
     )
+    with _ACTIVE_LOCK:
+        _ACTIVE.add(process)
     timed_out = False
     try:
-        stdout, stderr = process.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        timed_out = True
-        kill_process_tree(process)
         try:
-            stdout, stderr = process.communicate(timeout=5.0)
+            stdout, stderr = process.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
-            stdout, stderr = "", ""
+            timed_out = True
+            kill_process_tree(process)
+            try:
+                stdout, stderr = process.communicate(timeout=5.0)
+            except subprocess.TimeoutExpired:
+                stdout, stderr = "", ""
+    finally:
+        with _ACTIVE_LOCK:
+            _ACTIVE.discard(process)
     duration_ms = int((time.monotonic() - started) * 1000)
     return process.returncode, stdout or "", stderr or "", duration_ms, timed_out
 
