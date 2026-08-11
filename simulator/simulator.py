@@ -50,6 +50,16 @@ if sys.get_int_max_str_digits() < MAX_INT_DIGITS:
 # fault injector must never do.  A day is far beyond any test's patience.
 MAX_DELAY_MS = 86_400_000
 
+# Maximum bytes in one request line.  Without a bound a client can hold a
+# connection open and stream forever without a newline, and the buffer grows
+# until the process dies — measured 25 MB accepted on one unterminated line by
+# both DUTs.  On the native one an allocation failure escaping a thread entry
+# point calls std::terminate, so one malformed request takes the whole DUT
+# down.  The C++ DUT enforces the same number (cpp/src/server.cpp,
+# kMaxLineBytes): an over-long line is answered INVALID_JSON and the connection
+# closed, identically on both.
+MAX_LINE_BYTES = 1_048_576
+
 
 @dataclass(frozen=True, slots=True)
 class FaultConfig:
@@ -310,7 +320,29 @@ class DutRequestHandler(socketserver.StreamRequestHandler):
         )
         LOGGER.info("client_connected peer=%s:%s", peer[0], peer[1])
 
-        while line := self.rfile.readline():
+        while line := self.rfile.readline(MAX_LINE_BYTES + 1):
+            if len(line) > MAX_LINE_BYTES:
+                # Past the frame bound with no newline in sight. Answer, log
+                # and hang up: reading on would keep buffering a line that has
+                # already been rejected.
+                LOGGER.warning(
+                    "request_too_long peer=%s:%s bytes=%d limit=%d",
+                    peer[0],
+                    peer[1],
+                    len(line),
+                    MAX_LINE_BYTES,
+                )
+                self.wfile.write(
+                    (
+                        json.dumps(
+                            {"status": "error", "error_code": "INVALID_JSON"},
+                            sort_keys=True,
+                        )
+                        + "\n"
+                    ).encode("utf-8")
+                )
+                self.wfile.flush()
+                break
             raw_line = line.decode("utf-8", errors="replace").rstrip("\r\n")
             LOGGER.info("request peer=%s:%s payload=%s", peer[0], peer[1], raw_line)
 

@@ -297,3 +297,26 @@ def test_lesson_line_references_point_at_the_code_they_name() -> None:
         f"wait_until_ready is called on line {readiness[0]}; the lesson cites "
         "something else"
     )
+
+
+def test_the_documented_dut_command_actually_runs() -> None:
+    """The README's `pytest --dut cpp` has to work as written.
+
+    The option lived in tests/conftest.py, and pytest parses arguments before
+    loading nested conftests — so the bare form exited with "unrecognized
+    arguments: --dut". Every CI invocation names a path, which is exactly why
+    CI never saw it.
+    """
+    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    assert "pytest --dut cpp" in readme, "the documented command changed"
+
+    completed = subprocess.run(
+        [sys.executable, "-m", "pytest", "--dut", "cpp", "--collect-only", "-q"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr[-500:] or completed.stdout[-500:]
+    assert "unrecognized arguments" not in completed.stderr

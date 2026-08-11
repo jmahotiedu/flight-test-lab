@@ -16,7 +16,15 @@ import threading
 import time
 from pathlib import Path
 
-DEFAULT_ENV_EXCLUDES = ("EVIDENCE_DIR",)
+# Ambient state a validator must not inherit.
+#
+# EVIDENCE_DIR: checks run in a sandbox, never over the learner's evidence.
+# FTL_DUT: the README documents exporting it to select the C++ DUT, and with
+# it set every lesson's pytest_check ran against cpp/ — so Day 2's "your ping
+# test now passes" tested the implementation the learner had *not* edited, and
+# could not pass until Day 11's porting work. A lesson that wants the native
+# DUT says so in its own pytest_args (Day 11 does).
+DEFAULT_ENV_EXCLUDES = ("EVIDENCE_DIR", "FTL_DUT")
 
 
 # Put each child in its own process group (POSIX) or job-control group

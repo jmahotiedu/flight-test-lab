@@ -40,6 +40,13 @@ std::mutex g_hang_mutex;
 // merely slow, short enough that Ctrl+C still feels immediate.
 constexpr auto kShutdownGrace = std::chrono::seconds(2);
 
+// Maximum bytes in one request line, matching simulator.MAX_LINE_BYTES.  A
+// client that streams without ever sending a newline otherwise grows this
+// buffer until allocation fails — and an exception escaping a thread entry
+// point calls std::terminate, so one malformed request would take the whole
+// DUT down instead of costing one connection.
+constexpr std::size_t kMaxLineBytes = 1048576;
+
 void close_handle(socket_t handle) {
 #ifdef _WIN32
   ::closesocket(handle);
@@ -147,6 +154,43 @@ bool send_all(socket_t handle, const std::string& payload) {
 // One thread per connection, mirroring the Python ThreadingTCPServer.  The
 // Socket argument is taken by value and moved in, so this thread owns the
 // handle and closes it when the function returns by any path.
+// What to do after one frame: keep reading, or stop this connection.
+enum class Next { Continue, Stop };
+
+// Answer one complete request line.  Extracted so the same path serves a line
+// terminated by a newline and the final fragment left in the buffer when the
+// client half-closes without one.
+Next handle_line(const Socket& connection, const std::string& peer,
+                 const ServerOptions& options, std::string line) {
+  if (!line.empty() && line.back() == '\r') {
+    line.pop_back();
+  }
+
+  // Log the sanitised form: the raw bytes may not be valid UTF-8, and the
+  // Python DUT decodes with errors="replace" before logging. Writing raw
+  // bytes here would leave dut.log undecodable on native runs only, so an
+  // evidence reader would fail depending on which DUT produced it.
+  log_message(Level::Info,
+              "request peer=" + peer + " payload=" + sanitize_utf8(line));
+  // Byte-level detail, only under --verbose, mirroring the Python DUT's
+  // DEBUG records: what you want when a request looks wrong on the wire
+  // but fine in the summary line above.
+  log_message(Level::Debug, "request_bytes peer=" + peer + " length=" +
+                                std::to_string(line.size()));
+  const int request_number = ++g_request_count;
+  if (maybe_inject_fault(options, request_number)) {
+    return Next::Stop;
+  }
+
+  const std::string response = handle_request_line(line).dump();
+  if (!send_all(connection.get(), response + "\n")) {
+    log_message(Level::Warning, "send_failed peer=" + peer);
+    return Next::Stop;
+  }
+  log_message(Level::Info, "response peer=" + peer + " payload=" + response);
+  return Next::Continue;
+}
+
 void handle_connection(Socket connection, std::string peer,
                        const ServerOptions options) {
   log_message(Level::Info, "client_connected peer=" + peer);
@@ -156,42 +200,46 @@ void handle_connection(Socket connection, std::string peer,
   while (true) {
     const int received = ::recv(connection.get(), chunk, sizeof(chunk), 0);
     if (received <= 0) {
+      // An orderly half-close leaves whatever arrived without a trailing
+      // newline still buffered. The Python DUT's readline() returns that
+      // fragment and answers it, so discarding it here made the same request
+      // succeed against one implementation and vanish against the other.
+      if (received == 0 && !buffer.empty()) {
+        handle_line(connection, peer, options, buffer);
+      }
       break;
     }
     buffer.append(chunk, static_cast<std::size_t>(received));
 
+    // A client that never sends a newline would otherwise grow this buffer
+    // until allocation fails, and an exception escaping a thread entry point
+    // calls std::terminate — one malformed request taking down the DUT.
+    if (buffer.size() > kMaxLineBytes) {
+      log_message(Level::Warning, "request_too_long peer=" + peer + " bytes=" +
+                                      std::to_string(buffer.size()) +
+                                      " limit=" +
+                                      std::to_string(kMaxLineBytes));
+      send_all(connection.get(),
+               std::string(R"({"error_code": "INVALID_JSON", "status": "error"})") +
+                   "\n");
+      break;
+    }
+
     // TCP is a byte stream: one recv may carry several lines, or half of one.
     // The newline is the frame boundary, not the packet.
     std::size_t newline;
+    bool stop = false;
     while ((newline = buffer.find('\n')) != std::string::npos) {
       std::string line = buffer.substr(0, newline);
       buffer.erase(0, newline + 1);
-      if (!line.empty() && line.back() == '\r') {
-        line.pop_back();
+      if (handle_line(connection, peer, options, std::move(line)) ==
+          Next::Stop) {
+        stop = true;
+        break;
       }
-
-      // Log the sanitised form: the raw bytes may not be valid UTF-8, and the
-      // Python DUT decodes with errors="replace" before logging. Writing raw
-      // bytes here would leave dut.log undecodable on native runs only, so an
-      // evidence reader would fail depending on which DUT produced it.
-      log_message(Level::Info,
-                  "request peer=" + peer + " payload=" + sanitize_utf8(line));
-      // Byte-level detail, only under --verbose, mirroring the Python DUT's
-      // DEBUG records: what you want when a request looks wrong on the wire
-      // but fine in the summary line above.
-      log_message(Level::Debug, "request_bytes peer=" + peer + " length=" +
-                                    std::to_string(line.size()));
-      const int request_number = ++g_request_count;
-      if (maybe_inject_fault(options, request_number)) {
-        return;
-      }
-
-      const std::string response = handle_request_line(line).dump();
-      if (!send_all(connection.get(), response + "\n")) {
-        log_message(Level::Warning, "send_failed peer=" + peer);
-        return;
-      }
-      log_message(Level::Info, "response peer=" + peer + " payload=" + response);
+    }
+    if (stop) {
+      return;
     }
   }
 

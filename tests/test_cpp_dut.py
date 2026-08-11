@@ -791,3 +791,73 @@ def test_cpp_dut_shuts_down_with_a_client_connected(
     assert "dut_stopped" in stderr
     if fault == "hang":
         assert "handler_still_running" in stderr
+
+
+@pytest.mark.requirement("REQ-CPP-001")
+def test_both_duts_answer_a_final_frame_without_a_newline(
+    cpp_dut: int, python_dut: int
+) -> None:
+    """A half-close leaves the last request unterminated.
+
+    Python's readline() returns that fragment and answers it; the native
+    handler saw recv() return zero and discarded it, so the same request
+    succeeded against one implementation and vanished against the other.
+    """
+    request = b'{"command": "status", "sequence": 1}'  # deliberately no newline
+
+    def ask(port: int) -> bytes:
+        with socket.create_connection(("127.0.0.1", port), timeout=10) as connection:
+            connection.sendall(request)
+            connection.shutdown(socket.SHUT_WR)
+            connection.settimeout(5)
+            return connection.makefile("rb").readline()
+
+    assert ask(python_dut) == ask(cpp_dut)
+    assert b"READY" in ask(cpp_dut)
+
+
+@pytest.mark.requirement("REQ-CPP-001")
+def test_both_duts_bound_one_request_line(cpp_dut_binary: Path) -> None:
+    """An unterminated stream must cost one connection, not the process.
+
+    Measured 25 MB accepted on a single line by both DUTs before this bound.
+    On the native one an allocation failure escaping a thread entry point
+    calls std::terminate, so one malformed request would take down the DUT.
+    """
+    from simulator.simulator import MAX_LINE_BYTES
+
+    def probe(argv: list[str]) -> tuple[bytes, bool]:
+        port = reserve_local_port()
+        process = _start([*argv, "--host", "127.0.0.1", "--port", str(port)])
+        try:
+            _wait_for_accept("127.0.0.1", port)
+            with socket.create_connection(
+                ("127.0.0.1", port), timeout=15
+            ) as connection:
+                connection.sendall(b"x" * (MAX_LINE_BYTES + 1))
+                connection.settimeout(10)
+                reply = connection.makefile("rb").readline()
+            time.sleep(0.2)
+            return reply, process.poll() is None
+        finally:
+            _stop(process)
+
+    python_reply, python_alive = probe([sys.executable, "-m", "simulator.simulator"])
+    cpp_reply, cpp_alive = probe([str(cpp_dut_binary)])
+
+    assert python_reply == cpp_reply, (python_reply, cpp_reply)
+    assert b"INVALID_JSON" in python_reply
+    assert python_alive and cpp_alive, "the DUT died on one malformed request"
+
+
+@pytest.mark.requirement("REQ-CPP-001")
+def test_a_large_but_valid_request_is_still_answered(
+    cpp_dut: int, python_dut: int
+) -> None:
+    """The bound has to be a bound, not a ban on large requests."""
+    payload = json.dumps(
+        {"command": "status", "sequence": 1, "pad": "a" * 500_000}, sort_keys=True
+    )
+    assert _ask_raw(python_dut, payload, timeout=15) == _ask_raw(
+        cpp_dut, payload, timeout=15
+    )

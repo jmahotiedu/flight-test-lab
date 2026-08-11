@@ -1362,3 +1362,38 @@ def test_an_expected_failure_still_requires_its_positive_evidence() -> None:
     )
     assert not missing_evidence.passed
     assert "something else went wrong too" in missing_evidence.interpretation
+
+
+def test_lesson_checks_ignore_an_ambient_dut_selection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A lesson must test the implementation it tells the learner to edit.
+
+    The README documents exporting FTL_DUT=cpp, and with it set every
+    pytest_check ran against cpp/ — so Day 2's "your ping test passes now"
+    exercised the DUT the learner had *not* touched, and could not pass until
+    Day 11's porting work. Day 11 asks for the native DUT explicitly instead.
+    """
+    probe = REPO_ROOT / "tests" / "test_ambient_dut_probe.py"
+    probe.write_text(
+        "def test_which(dut_implementation):\n"
+        "    print('IMPLEMENTATION:', dut_implementation)\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("FTL_DUT", "cpp")
+    try:
+        result = run_validator(
+            "pytest_check",
+            {
+                "nodeids": ["tests/test_ambient_dut_probe.py"],
+                "expect": "pass",
+                "pytest_args": ["-s"],
+                "timeout_seconds": 120,
+            },
+            CONTEXT,
+        )
+    finally:
+        probe.unlink(missing_ok=True)
+
+    assert result.passed, result.interpretation
+    assert "IMPLEMENTATION: python" in result.stdout, result.stdout[-400:]

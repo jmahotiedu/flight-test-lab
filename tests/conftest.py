@@ -32,17 +32,8 @@ def reserve_local_port() -> int:
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
-def pytest_addoption(parser: pytest.Parser) -> None:
-    parser.addoption(
-        "--dut",
-        action="store",
-        default=os.environ.get("FTL_DUT", "python"),
-        choices=("python", "cpp"),
-        help=(
-            "Which device-under-test implementation to exercise. Both speak the "
-            "same protocol; 'cpp' requires cpp/build to be built first."
-        ),
-    )
+# --dut is registered in the root conftest.py: pytest parses options before
+# loading nested conftests, so a bare `pytest --dut cpp` needs it there.
 
 
 def cpp_dut_path() -> Path | None:

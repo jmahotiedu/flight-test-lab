@@ -24,6 +24,14 @@ STATE_VERSION = 1
 # disappearing, so interview mode never runs out of material.
 MIN_INTERVIEW_WEIGHT = 0.05
 
+# Upper bound for any persisted counter.  "Is an int" is not "is a number this
+# code can use": a 4000-digit `incorrect` raises OverflowError the first time
+# interview_weights() converts it to float, and a large negative `streak`
+# overflows in the exponentiation — either one stops Interview mode responding
+# instead of taking the documented backup-and-reset path.  A million of
+# anything is already far beyond a real course.
+MAX_COUNTER = 1_000_000
+
 
 def _now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
@@ -68,9 +76,13 @@ def _record_is_valid(section: str, record: dict[str, Any]) -> bool:
 
     for field in integer_fields:
         value = record.get(field)
-        if value is not None and (
-            isinstance(value, bool) or not isinstance(value, int)
-        ):
+        if value is None:
+            continue
+        if isinstance(value, bool) or not isinstance(value, int):
+            return False
+        # Range, not just type. These are counts, so a negative one is
+        # nonsense and an enormous one is unusable arithmetic.
+        if not 0 <= value <= MAX_COUNTER:
             return False
     for field in list_fields:
         value = record.get(field)

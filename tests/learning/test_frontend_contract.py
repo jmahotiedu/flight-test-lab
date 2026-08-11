@@ -170,3 +170,23 @@ def test_state_changing_clicks_disable_before_they_post() -> None:
         "these click handlers post before disabling anything, so a "
         f"double-click posts twice: {unguarded}"
     )
+
+
+def test_continue_checks_the_navigation_it_started_from() -> None:
+    """loadLesson's own token cannot protect a delayed completion.
+
+    A stale Continue handler calls loadLesson, which *creates* the newest
+    token — so it would navigate over the lesson the learner picked from the
+    roadmap while the POST was in flight. The check has to happen in the
+    handler, against the navigation that was current when it was clicked.
+    """
+    source = APP_JS.read_text(encoding="utf-8")
+    handler = re.search(
+        r"guardedClick\(continueBtn, async \(\) => \{(.*?)\n  \}\);", source, re.DOTALL
+    )
+    assert handler, "the Continue handler is no longer shaped as expected"
+    body = handler.group(1)
+    captured = body.index("state.navigation")
+    posted = body.index("await api.post")
+    assert captured < posted, "the navigation token is captured after the request"
+    assert "!== state.navigation" in body, "the stale response is never discarded"

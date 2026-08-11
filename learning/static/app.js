@@ -222,7 +222,13 @@ function renderFocus(lesson) {
   const continueBtn = el("button", { class: "primary" }, "Continue");
   const missingBox = el("div", { class: "missing-list" });
   guardedClick(continueBtn, async () => {
+    // The navigation token cannot protect this one, because a stale handler
+    // would *create* the newest token by calling loadLesson. Capture the
+    // navigation that was current when Continue was pressed, and stand down
+    // if the learner has since picked a lesson from the roadmap.
+    const token = state.navigation;
     const { ok, data } = await api.post("/api/complete", { lesson_id: lesson.id });
+    if (token !== state.navigation) return true;
     if (!ok) {
       missingBox.innerHTML = "";
       missingBox.append(el("div", { class: "feedback-fail" },

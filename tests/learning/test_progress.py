@@ -651,3 +651,32 @@ def test_resume_ignores_a_last_lesson_that_is_no_longer_actionable(
     store.mark_started("d9-threaded-server")  # locked: Day 1 is not done
     assert store.snapshot()["last_lesson_id"] == "d9-threaded-server"
     assert store.resume_lesson_id(curriculum) == curriculum.ordered_lesson_ids[0]
+
+
+@pytest.mark.parametrize(
+    ("label", "payload"),
+    [
+        # Integer-typed and still unusable: float() overflows on the first,
+        # exponentiation on the second, and both stop Interview mode
+        # responding rather than taking the documented reset path.
+        (
+            "enormous count",
+            '{"version": 1, "interview": {"q": {"incorrect": ' + "9" * 4000 + "}}}",
+        ),
+        ("negative streak", '{"version": 1, "interview": {"q": {"streak": -1000000}}}'),
+        ("negative attempts", '{"version": 1, "lessons": {"l": {"attempts": -5}}}'),
+    ],
+)
+def test_counters_outside_a_usable_range_are_reset(
+    tmp_path: Path, label: str, payload: str
+) -> None:
+    path = tmp_path / "progress.json"
+    path.write_text(payload, encoding="utf-8")
+
+    store = ProgressStore(path)
+
+    assert store.snapshot()["interview"] == {}
+    assert store.snapshot()["lessons"] == {}
+    assert path.with_suffix(".corrupt.json").exists()
+    # The point of resetting is that the server keeps working.
+    assert store.interview_weights({"q": ()})["q"] > 0
