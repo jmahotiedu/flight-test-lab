@@ -95,3 +95,45 @@ def test_code_fences_keep_the_command_the_learner_must_run() -> None:
     assert checked > 20, (
         f"only {checked} command fences checked — test is not exercising the curriculum"
     )
+
+
+def test_mdinline_output_is_always_interpreted_as_markup() -> None:
+    """mdInline() returns HTML, so it must reach the DOM through `html:`.
+
+    el() appends a string child as a text node, so passing the markup
+    positionally shows the tags: Day 10's choices read literally as
+    "<code>ruff format</code>" and "&lt;failure&gt;". There is no JS runtime
+    here, so the rule is enforced structurally — every call site, not just the
+    one that was wrong.
+    """
+    source = APP_JS.read_text(encoding="utf-8")
+    lines = source.splitlines()
+    offenders = []
+    for match in re.finditer(r"mdInline\(", source):
+        number = source[: match.start()].count("\n") + 1
+        if lines[number - 1].lstrip().startswith("//"):
+            continue  # a comment mentioning it
+        prefix = source[: match.start()].rstrip()
+        if prefix.endswith("function") or prefix.endswith("html:"):
+            continue  # the definition itself, or a correct call site
+        offenders.append(f"line {number}: {lines[number - 1].strip()[:70]}")
+    assert not offenders, (
+        "mdInline() output must reach the DOM through html:, or el() renders "
+        f"it as literal text — {offenders}"
+    )
+
+
+def test_a_quiz_answered_earlier_is_disabled_on_reload() -> None:
+    """Restoring the highlight is not restoring the state.
+
+    The live success path disables every option; the reload path used to
+    restore only the green highlight, so a stray click on a finished quiz
+    could show a failure and re-post the answer, moving concept mastery for a
+    question already answered correctly.
+    """
+    source = APP_JS.read_text(encoding="utf-8")
+    branch = re.search(r"if \(alreadyCorrect\) \{(.*?)\n    \}", source, re.DOTALL)
+    assert branch, "no alreadyCorrect restore branch found"
+    assert "disabled = true" in branch.group(1), (
+        "the restore branch does not disable the options"
+    )

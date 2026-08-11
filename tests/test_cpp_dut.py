@@ -137,6 +137,22 @@ PARITY_BYTE_REQUESTS = (
         id="nested-absurd",
     ),
     pytest.param('{"command":"status","sequence":"é😀"}'.encode(), id="non-ascii"),
+    # Integer literals at and past MAX_INT_DIGITS. CPython caps
+    # integer-string conversion, and the ValueError that raises is not a
+    # JSONDecodeError — so this used to unwind the Python DUT's connection
+    # thread while the C++ DUT echoed the number back.
+    pytest.param(
+        ('{"command":"status","sequence":' + "1" * 4300 + "}").encode(),
+        id="int-at-digit-limit",
+    ),
+    pytest.param(
+        ('{"command":"status","sequence":' + "1" * 4301 + "}").encode(),
+        id="int-over-digit-limit",
+    ),
+    pytest.param(
+        ('{"command":"status","sequence":-' + "1" * 4301 + "}").encode(),
+        id="negative-int-over-digit-limit",
+    ),
 )
 
 

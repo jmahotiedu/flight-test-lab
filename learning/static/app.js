@@ -231,7 +231,10 @@ function renderBlock(lesson, block, done) {
     const feedback = el("div");
     const alreadyCorrect = lesson.progress.quiz_correct.includes(block.id);
     block.options.forEach((option, index) => {
-      const opt = el("button", {}, mdInline(option));
+      // html:, not a child — el() appends a string as a text node, so the
+      // markup mdInline() produces would show up as literal "<code>ruff
+      // format</code>" and "&lt;failure&gt;" in the option text.
+      const opt = el("button", { html: mdInline(option) });
       if (alreadyCorrect && index === block.answer_index) opt.classList.add("chosen-correct");
       opt.addEventListener("click", async () => {
         const { data } = await api.post("/api/step", {
@@ -262,6 +265,14 @@ function renderBlock(lesson, block, done) {
       });
       options.append(opt);
     });
+    if (alreadyCorrect) {
+      // The live success path disables the options; a reload restored only the
+      // highlight, so a stray click on a finished quiz could show a failure
+      // and re-record the answer, moving concept mastery for a question the
+      // learner had already got right.
+      box.classList.add("done");
+      options.querySelectorAll("button").forEach((b) => (b.disabled = true));
+    }
     box.append(options, feedback);
     if (block.type === "predict" && !alreadyCorrect) {
       // predict blocks don't gate completion; nothing else needed

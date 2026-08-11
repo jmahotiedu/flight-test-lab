@@ -28,6 +28,13 @@ evidence/junit/*
 cpp/build/
 .serena/
 learning/.progress.json
-learning/.progress.tmp
+# The advisory lock the server holds while running. It is deliberately left on
+# disk — deleting it on exit would race a second instance that is mid-acquire —
+# and the kernel, not the file, is what releases the lock.
+learning/.progress.lock
+# Atomic-write scratch files carry the writing process's pid, so one interrupted
+# run leaves .progress.<pid>.tmp behind. The old fixed-name rule matched none of
+# them.
+learning/.progress.*.tmp
 learning/.corrupt.json
 learning/*.corrupt.json

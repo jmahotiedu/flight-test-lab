@@ -49,6 +49,13 @@ class Parser {
   // meaning would depend on which DUT answered it.
   static constexpr int kMaxDepth = 100;
 
+  // Digits allowed in an integer literal, matching CPython's default
+  // integer-string conversion limit and simulator.MAX_INT_DIGITS.  Python
+  // raises on a longer one and answers INVALID_JSON; without the same bound
+  // here, this DUT would happily echo a 5000-digit request the other calls
+  // malformed.
+  static constexpr std::size_t kMaxIntDigits = 4300;
+
   void skip_whitespace() {
     while (position_ < text_.size()) {
       const char c = text_[position_];
@@ -389,6 +396,14 @@ class Parser {
         return std::nullopt;
       }
       return Value(value);
+    }
+    // Python refuses to convert an integer literal past kMaxIntDigits (the
+    // conversion is quadratic), and answers INVALID_JSON.  Echoing it here
+    // instead would mean the same 5000-digit request is a valid document for
+    // one DUT and malformed for the other — the exact divergence a second
+    // implementation exists to expose.
+    if (token.size() - (token[0] == '-' ? 1 : 0) > kMaxIntDigits) {
+      return std::nullopt;
     }
     try {
       std::size_t consumed = 0;

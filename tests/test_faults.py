@@ -17,6 +17,8 @@ import pytest
 from conftest import RunningDut, reserve_local_port
 from testlab.client import LabClient, LabCommunicationError
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
 
 def _start_dut(
     evidence_dir: Path, log_name: str, extra_args: list[str]
@@ -251,6 +253,46 @@ def test_fault_config_with_a_bad_encoding_is_a_cli_error(tmp_path: Path) -> None
     path.write_bytes(b'{"drop_connection": true, "note": "\xff\xfe"}')
     with pytest.raises(SystemExit, match="--fault-config: cannot read"):
         load_fault_config(path)
+
+
+@pytest.mark.requirement("REQ-FAULT-001")
+def test_a_rejected_config_leaves_no_evidence_behind(tmp_path: Path) -> None:
+    """A log file means an experiment ran.
+
+    configure_logging creates the parent directory and the file, so validating
+    the fault selection afterwards left a dut.log on disk for a run that never
+    started — and the whole value of evidence/logs/dut.log existing is that it
+    did.
+    """
+    log = tmp_path / "logs" / "dut.log"
+    config = tmp_path / "fault.json"
+    config.write_text(json.dumps({"drop_connection": "false"}), encoding="utf-8")
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "simulator.simulator",
+            "--port",
+            "9099",
+            "--log-file",
+            str(log),
+            "--fault-config",
+            str(config),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+        cwd=str(REPO_ROOT),
+    )
+
+    assert result.returncode != 0
+    assert "must be true or false" in (result.stderr or result.stdout)
+    assert not log.exists(), (
+        "an evidence artifact was created for a run that never began"
+    )
+    assert not log.parent.exists()
 
 
 @pytest.mark.requirement("REQ-FAULT-001")

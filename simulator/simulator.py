@@ -24,6 +24,14 @@ LOGGER = logging.getLogger("synthetic_dut")
 # payload cannot mean different things to the two implementations.
 MAX_NESTING_DEPTH = 100
 
+# Maximum digits in an integer literal.  CPython 3.11 caps integer-string
+# conversion (4300 digits by default) because the conversion is quadratic, and
+# the ValueError it raises is not a JSONDecodeError — so an oversized number
+# escaped the handler entirely.  Making it an explicit protocol bound means the
+# answer does not depend on the interpreter's setting, and the C++ DUT
+# (cpp/src/json.cpp, kMaxIntDigits) enforces the same number.
+MAX_INT_DIGITS = 4300
+
 
 @dataclass(frozen=True, slots=True)
 class FaultConfig:
@@ -179,17 +187,34 @@ def exceeds_nesting_limit(value: object, limit: int = MAX_NESTING_DEPTH) -> bool
     return False
 
 
+def _parse_int(token: str) -> int:
+    """json's integer hook, bounded by MAX_INT_DIGITS.
+
+    CPython 3.11 refuses to convert integer strings past a per-interpreter
+    limit (4300 digits by default), and the ValueError it raises is not a
+    JSONDecodeError — so a long-but-valid number used to unwind the connection
+    thread.  Enforcing the bound here makes the answer INVALID_JSON, and makes
+    it the *same* answer on 3.10, on an interpreter started with a different
+    limit, and in the C++ DUT, which enforces the identical constant.
+    """
+    if len(token.lstrip("-")) > MAX_INT_DIGITS:
+        raise ValueError(f"integer exceeds {MAX_INT_DIGITS} digits")
+    return int(token)
+
+
 def decode_request(raw_line: str) -> tuple[object | None, bool]:
     """Decode one request line; return (message, ok).
 
     ``ok`` is False for anything the protocol rejects outright — malformed
-    JSON, or nesting past MAX_NESTING_DEPTH.  RecursionError is caught
-    alongside JSONDecodeError because json.loads raises it on deeply nested
-    input, and an uncaught one would take the connection thread down.
+    JSON, nesting past MAX_NESTING_DEPTH, or an integer past MAX_INT_DIGITS.
+    RecursionError is caught alongside ValueError because json.loads raises it
+    on deeply nested input, and an uncaught one would take the connection
+    thread down.  ValueError covers JSONDecodeError (a subclass) and the
+    oversized-integer case above.
     """
     try:
-        message = json.loads(raw_line)
-    except (json.JSONDecodeError, RecursionError):
+        message = json.loads(raw_line, parse_int=_parse_int)
+    except (ValueError, RecursionError):
         return None, False
     if exceeds_nesting_limit(message):
         return None, False
@@ -380,8 +405,12 @@ def main() -> int:
     args = parse_args()
     if not 1 <= args.port <= 65535:
         raise SystemExit("--port must be between 1 and 65535")
-    configure_logging(args.log_file, args.verbose)
+    # Resolved before the log is opened. configure_logging creates the parent
+    # directory and the file, so validating afterwards left an evidence
+    # artifact behind for a run that never started — and the whole point of
+    # evidence/logs/dut.log existing is that an experiment ran.
     fault_config = resolve_fault_config(args)
+    configure_logging(args.log_file, args.verbose)
     if fault_config.startup_delay_ms > 0:
         LOGGER.warning(
             "fault_injected fault=startup_delay delay_ms=%d",
