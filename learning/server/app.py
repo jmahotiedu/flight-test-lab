@@ -469,7 +469,7 @@ class LearningHandler(BaseHTTPRequestHandler):
         lowered = answer_text.lower()
         hits = [kw for kw in question.keywords if kw.lower() in lowered]
         correct = len(hits) >= 1
-        self.server.progress.record_interview(question.id, correct)
+        self.server.progress.record_interview(question.id, correct, question.concepts)
         self._send_json(
             {
                 "correct": correct,

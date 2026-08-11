@@ -102,11 +102,23 @@ bool maybe_inject_fault(const ServerOptions& options, int request_number) {
   }
 }
 
+// MSG_NOSIGNAL makes a write to a closed socket return EPIPE instead of
+// raising SIGPIPE, whose default action would kill the whole process.  One
+// client hanging up mid-conversation must cost one connection, not the DUT.
+// Windows has no SIGPIPE and no such flag; main() also installs SIG_IGN for
+// platforms (e.g. macOS) that lack MSG_NOSIGNAL.
+#ifdef MSG_NOSIGNAL
+constexpr int kSendFlags = MSG_NOSIGNAL;
+#else
+constexpr int kSendFlags = 0;
+#endif
+
 bool send_all(socket_t handle, const std::string& payload) {
   std::size_t sent = 0;
   while (sent < payload.size()) {
     const int chunk = ::send(handle, payload.data() + sent,
-                             static_cast<int>(payload.size() - sent), 0);
+                             static_cast<int>(payload.size() - sent),
+                             kSendFlags);
     if (chunk <= 0) {
       return false;
     }

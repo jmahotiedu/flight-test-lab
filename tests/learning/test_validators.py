@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import socket
 import time
 from pathlib import Path
 
 import pytest
 
+from learning.checks.common import reserve_port
 from learning.server.validators import (
     ValidatorContext,
     run_validator,
@@ -48,6 +50,49 @@ def test_validator_timeout_kills_subprocess() -> None:
     assert result.timed_out
     assert not result.passed
     assert elapsed < 15  # the 60s sleep was killed, not awaited
+
+
+def test_validator_timeout_kills_the_whole_process_tree() -> None:
+    """A timeout must reap grandchildren too, not just the direct child.
+
+    Validators routinely start processes that start processes — pytest_check
+    launches pytest which launches a DUT.  Killing only the immediate child
+    leaves that DUT running and holding its port after the UI has already
+    reported a timeout, which is exactly the orphan the course teaches you to
+    avoid.  The grandchild here holds a port; the port becoming bindable again
+    is the proof that it died.
+    """
+    port = reserve_port()
+    grandchild = (
+        "import socket, time; "
+        "s = socket.socket(); "
+        "s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 0); "
+        f"s.bind(('127.0.0.1', {port})); s.listen(1); time.sleep(120)"
+    )
+    snippet = (
+        "import subprocess, sys, time\n"
+        f"subprocess.Popen([sys.executable, '-c', {grandchild!r}])\n"
+        "time.sleep(120)\n"
+    )
+
+    result = run_validator(
+        "python_probe", {"snippet": snippet, "timeout_seconds": 2}, CONTEXT
+    )
+    assert result.timed_out
+
+    deadline = time.monotonic() + 20
+    last_error: OSError | None = None
+    while time.monotonic() < deadline:
+        probe = socket.socket()
+        try:
+            probe.bind(("127.0.0.1", port))
+            return  # the grandchild released the port, so it is gone
+        except OSError as exc:
+            last_error = exc
+            time.sleep(0.25)
+        finally:
+            probe.close()
+    pytest.fail(f"grandchild still holds port {port} after the timeout: {last_error}")
 
 
 def test_pytest_check_pass_and_junit_evidence() -> None:

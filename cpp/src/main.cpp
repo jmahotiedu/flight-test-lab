@@ -10,6 +10,10 @@
 #include <string>
 #include <vector>
 
+#if defined(__linux__)
+#include <sys/prctl.h>
+#endif
+
 #include "dut/logging.hpp"
 #include "dut/server.hpp"
 
@@ -114,6 +118,20 @@ int main(int argc, char** argv) {
   dut::configure_logging(log_file, verbose);
   std::signal(SIGINT, handle_signal);
   std::signal(SIGTERM, handle_signal);
+
+#ifdef SIGPIPE
+  // A client that disconnects mid-write must not kill the DUT.  The send path
+  // uses MSG_NOSIGNAL where it exists; this covers the platforms that do not.
+  std::signal(SIGPIPE, SIG_IGN);
+#endif
+
+#if defined(__linux__) && defined(PR_SET_PTRACER)
+  // The debugging lessons attach GDB from a sibling process, which Linux
+  // denies under the default Yama ptrace_scope=1.  This synthetic DUT opts
+  // in to being traced so the exercise works for an ordinary user without
+  // sudo or a system-wide sysctl change.
+  ::prctl(PR_SET_PTRACER, PR_SET_PTRACER_ANY, 0, 0, 0);
+#endif
 
   return dut::run_server(options, g_stop_requested);
 }

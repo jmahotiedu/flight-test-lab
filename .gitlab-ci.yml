@@ -46,7 +46,9 @@ native:
     - mkdir -p evidence/junit evidence/logs
     - cmake -S cpp -B cpp/build
     - cmake --build cpp/build
-    - ctest --test-dir cpp/build -C Debug --output-on-failure
+    # --output-junit puts the CTest evidence under evidence/, which is the
+    # path the traceability map declares for REQ-CPP-001.
+    - ctest --test-dir cpp/build -C Debug --output-on-failure --output-junit "$CI_PROJECT_DIR/evidence/junit/ctest-results.xml"
     - pytest -v --dut cpp tests/test_status.py tests/test_protocol.py --junitxml=evidence/junit/test-results-cpp.xml
     - pytest -v tests/test_cpp_dut.py --junitxml=evidence/junit/test-results-parity.xml
   artifacts:

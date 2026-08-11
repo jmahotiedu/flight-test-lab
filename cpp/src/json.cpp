@@ -1,8 +1,11 @@
 #include "dut/json.hpp"
 
 #include <algorithm>
+#include <cerrno>
+#include <charconv>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <sstream>
 #include <stdexcept>
 
@@ -252,32 +255,91 @@ class Parser {
     }
   }
 
-  std::optional<Value> parse_number() {
+  bool consume_digits() {
     const std::size_t start = position_;
-    if (position_ < text_.size() && (text_[position_] == '-' || text_[position_] == '+')) {
+    while (position_ < text_.size() && text_[position_] >= '0' &&
+           text_[position_] <= '9') {
       ++position_;
     }
-    bool is_double = false;
-    while (position_ < text_.size()) {
-      const char c = text_[position_];
-      if (c >= '0' && c <= '9') {
-        ++position_;
-      } else if (c == '.' || c == 'e' || c == 'E' || c == '+' || c == '-') {
-        is_double = true;
-        ++position_;
-      } else {
-        break;
-      }
+    return position_ > start;
+  }
+
+  // Scans the JSON number grammar exactly:
+  //
+  //   number = [ '-' ] ( '0' | [1-9][0-9]* ) [ '.' [0-9]+ ] [ ('e'|'E')
+  //            ['+'|'-'] [0-9]+ ]
+  //
+  // Scanning loosely and then leaning on std::stod/std::stoll does not work:
+  // both accept a valid *prefix* and ignore the rest, so "1+2" would parse as
+  // 1 while Python's json rejects the whole document.  A permissive number
+  // scanner is therefore a parity bug and a malformed-input bug at once.
+  std::optional<Value> parse_number() {
+    const std::size_t start = position_;
+    if (position_ < text_.size() && text_[position_] == '-') {
+      ++position_;  // a leading '+' is not legal JSON
     }
-    if (position_ == start) {
+
+    if (position_ >= text_.size()) {
       return std::nullopt;
     }
-    const std::string token = text_.substr(start, position_ - start);
-    try {
-      if (is_double) {
-        return Value(std::stod(token));
+    if (text_[position_] == '0') {
+      ++position_;  // a leading zero may not be followed by more digits
+      if (position_ < text_.size() && text_[position_] >= '0' &&
+          text_[position_] <= '9') {
+        return std::nullopt;
       }
-      return Value(static_cast<std::int64_t>(std::stoll(token)));
+    } else if (!consume_digits()) {
+      return std::nullopt;
+    }
+
+    bool is_double = false;
+    if (position_ < text_.size() && text_[position_] == '.') {
+      ++position_;
+      if (!consume_digits()) {
+        return std::nullopt;  // "1." is not a number
+      }
+      is_double = true;
+    }
+    if (position_ < text_.size() &&
+        (text_[position_] == 'e' || text_[position_] == 'E')) {
+      ++position_;
+      if (position_ < text_.size() &&
+          (text_[position_] == '+' || text_[position_] == '-')) {
+        ++position_;
+      }
+      if (!consume_digits()) {
+        return std::nullopt;  // "1e" and "1e+" are not numbers
+      }
+      is_double = true;
+    }
+
+    const std::string token = text_.substr(start, position_ - start);
+    if (is_double) {
+      // strtod rather than stod: overflow must become ±inf and underflow ±0,
+      // matching Python (json.loads("1e400") is inf, "1e-400" is 0.0), where
+      // stod would throw out_of_range for both and reject a document Python
+      // accepts.
+      errno = 0;
+      char* end = nullptr;
+      const double value = std::strtod(token.c_str(), &end);
+      if (end != token.c_str() + token.size()) {
+        return std::nullopt;
+      }
+      return Value(value);
+    }
+    try {
+      std::size_t consumed = 0;
+      const long long value = std::stoll(token, &consumed);
+      if (consumed != token.size()) {
+        return std::nullopt;
+      }
+      return Value(static_cast<std::int64_t>(value));
+    } catch (const std::out_of_range&) {
+      // Python integers are arbitrary precision, so an integer too large for
+      // int64_t is echoed back as-is instead of being lost or turned into a
+      // float.  The grammar above already rejects leading zeros and '+', so
+      // the token matches Python's repr of the same integer.
+      return Value(RawNumber{token});
     } catch (const std::exception&) {
       return std::nullopt;
     }
@@ -310,6 +372,31 @@ void dump_string(std::ostringstream& out, const std::string& text) {
     }
   }
   out << '"';
+}
+
+// Reproduces Python's float repr, which is what json.dumps emits: the shortest
+// decimal string that round-trips, with a ".0" forced onto integral values so
+// 1.5e3 prints as 1500.0 and not 1500.  std::to_chars gives the same shortest
+// round-trip digits; only the trailing ".0" has to be added by hand.
+// Non-finite values follow Python's json, which emits the JavaScript spellings
+// rather than failing.
+std::string format_double(double value) {
+  if (std::isnan(value)) {
+    return "NaN";
+  }
+  if (std::isinf(value)) {
+    return value > 0 ? "Infinity" : "-Infinity";
+  }
+  char buffer[64];
+  const std::to_chars_result result =
+      std::to_chars(buffer, buffer + sizeof(buffer), value);
+  std::string text(buffer, result.ptr);
+  if (text.find('.') == std::string::npos &&
+      text.find('e') == std::string::npos &&
+      text.find('E') == std::string::npos) {
+    text += ".0";
+  }
+  return text;
 }
 
 void dump_value(std::ostringstream& out, const Value& value);
@@ -352,13 +439,12 @@ void dump_value(std::ostringstream& out, const Value& value) {
     case Value::Type::Int:
       out << value.as_int();
       break;
-    case Value::Type::Double: {
-      std::ostringstream number;
-      number.precision(17);
-      number << value.as_double_for_dump();
-      out << number.str();
+    case Value::Type::Double:
+      out << format_double(value.as_double_for_dump());
       break;
-    }
+    case Value::Type::Raw:
+      out << value.as_string();  // echoed exactly as it arrived
+      break;
     case Value::Type::String:
       dump_string(out, value.as_string());
       break;
@@ -401,8 +487,13 @@ const Value* Value::find(const std::string& key) const {
 }
 
 const std::string& Value::as_string() const {
-  const std::string* text = std::get_if<std::string>(&storage_);
-  return text != nullptr ? *text : kEmptyString;
+  if (const std::string* text = std::get_if<std::string>(&storage_)) {
+    return *text;
+  }
+  if (const RawNumber* raw = std::get_if<RawNumber>(&storage_)) {
+    return raw->text;  // lets the serialiser echo the literal unchanged
+  }
+  return kEmptyString;
 }
 
 std::int64_t Value::as_int() const {

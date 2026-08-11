@@ -137,7 +137,14 @@ function renderFocus(lesson) {
   );
   view.append(head);
 
-  if (lesson.flow) renderFlow(lesson.flow, view);
+  // The flow is fetched asynchronously, so reserve its slot now. Appending
+  // from the callback instead would put the diagram after the footer, and a
+  // fast lesson switch could drop the previous lesson's flow into this one.
+  const flowSlot = lesson.flow ? el("div", { class: "flow-slot" }) : null;
+  if (flowSlot) {
+    view.append(flowSlot);
+    renderFlow(lesson.flow, flowSlot, lesson.id);
+  }
 
   for (const block of lesson.blocks) {
     view.append(renderBlock(lesson, block, doneBlocks.has(block.id)));
@@ -343,11 +350,16 @@ function renderCheckResult(result) {
   return wrap;
 }
 
-async function renderFlow(flowName, container) {
+async function renderFlow(flowName, container, lessonId) {
   let flow;
   try {
     flow = await api.get("/api/flow/" + encodeURIComponent(flowName));
   } catch {
+    return;
+  }
+  // Discard a response that arrived after the learner moved on: the slot for
+  // that lesson is no longer in the document.
+  if (!container.isConnected || (lessonId && state.lesson?.id !== lessonId)) {
     return;
   }
   const section = el("div", { class: "block" },

@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from learning.server.curriculum import load_curriculum
 from learning.server.progress import ProgressStore
 from learning.server.validators import validator_names
@@ -39,6 +41,38 @@ def test_corrupt_progress_is_backed_up_and_reset(tmp_path: Path) -> None:
     store = ProgressStore(path)
     assert store.snapshot()["lessons"] == {}
     assert (tmp_path / "progress.corrupt.json").exists()
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        '{"version": 1, "lessons": []}',
+        '{"version": 1, "lessons": {"d1": "not-a-record"}}',
+        '{"version": 1, "concepts": 7}',
+        '{"version": 1, "interview": "nope"}',
+        '{"version": 1, "last_lesson_id": 42}',
+        '{"version": 99, "lessons": {}}',
+    ],
+)
+def test_structurally_invalid_state_is_backed_up_and_reset(
+    tmp_path: Path, payload: str
+) -> None:
+    """Parsing is not validation.
+
+    Each of these files is valid JSON, so the old load path accepted them and
+    the damage only surfaced later as an AttributeError inside a request
+    handler. They must take the documented back-up-and-reset path instead.
+    """
+    path = tmp_path / "progress.json"
+    path.write_text(payload, encoding="utf-8")
+
+    store = ProgressStore(path)
+    snapshot = store.snapshot()
+
+    assert snapshot["lessons"] == {}
+    assert snapshot["concepts"] == {}
+    assert snapshot["interview"] == {}
+    assert path.with_suffix(".corrupt.json").exists(), "damaged state was not preserved"
 
 
 def test_completion_requires_mandatory_validation(tmp_path: Path) -> None:
@@ -117,6 +151,47 @@ def test_interview_weights_prefer_weak_concepts(tmp_path: Path) -> None:
         {"iq-weak": ("timing",), "iq-strong": ("logging",)}
     )
     assert weights["iq-weak"] > weights["iq-strong"]
+
+
+def test_answering_correctly_stops_a_question_dominating_the_pool(
+    tmp_path: Path,
+) -> None:
+    """Correct answers must decay a question's weight, not raise it.
+
+    Interview mode promises weak concepts come back more often. If every
+    correct answer nudged the weight up, a question answered right ten times
+    would eventually outrank questions never seen at all — the opposite of
+    what the mode is for.
+    """
+    store = ProgressStore(tmp_path / "progress.json")
+    questions = {"iq-known": ("timing",), "iq-unseen": ("timing",)}
+
+    baseline = store.interview_weights(questions)["iq-known"]
+    for _ in range(5):
+        store.record_interview("iq-known", True, ("timing",))
+    after = store.interview_weights(questions)
+
+    assert after["iq-known"] < baseline
+    assert after["iq-known"] < after["iq-unseen"]
+    assert after["iq-known"] > 0, "a mastered question must stay in the pool"
+
+
+def test_missed_interview_questions_resurface(tmp_path: Path) -> None:
+    store = ProgressStore(tmp_path / "progress.json")
+    questions = {"iq-missed": ("timing",), "iq-unseen": ("timing",)}
+    store.record_interview("iq-missed", False, ("timing",))
+    weights = store.interview_weights(questions)
+    assert weights["iq-missed"] > weights["iq-unseen"]
+
+
+def test_interview_answers_move_concept_mastery(tmp_path: Path) -> None:
+    """Interview mode advertises weak-area tracking; answers must feed it."""
+    store = ProgressStore(tmp_path / "progress.json")
+    store.record_interview("iq-1", False, ("timing",))
+    store.record_interview("iq-2", False, ("timing",))
+    mastery = store.concept_mastery(("timing",))
+    assert mastery["timing"]["incorrect"] == 2
+    assert mastery["timing"]["weak"] is True
 
 
 def test_progress_file_is_written_atomically(tmp_path: Path) -> None:

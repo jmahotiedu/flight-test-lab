@@ -119,6 +119,18 @@ def _evaluate(
         # problem, not a learner mistake: GDB reads DWARF, and an MSVC build
         # ships PDBs it cannot read.  Say so, instead of leaving a bare
         # "output did not match" for the learner to decode.
+        if name == "gdb-attach" and "ptrace: Operation not permitted" in combined:
+            # Linux's Yama LSM (ptrace_scope=1, the Ubuntu/Debian default)
+            # only lets a parent trace its child. The DUT calls
+            # prctl(PR_SET_PTRACER, PR_SET_PTRACER_ANY) to allow this, so
+            # reaching here means either an older binary or a hardened
+            # ptrace_scope=2/3.
+            interpretation += (
+                ". The kernel refused the attach (Yama ptrace_scope). Rebuild "
+                "the DUT so it carries the PR_SET_PTRACER opt-in "
+                "(cmake --build cpp/build), or relax the policy for this "
+                "session: sudo sysctl -w kernel.yama.ptrace_scope=0"
+            )
         if name.startswith("gdb") and "?? ()" in combined:
             interpretation += (
                 ". GDB resolved no symbol names (`?? ()` frames), which means "

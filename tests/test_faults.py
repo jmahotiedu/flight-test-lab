@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import socket
 import subprocess
@@ -198,3 +199,94 @@ def test_fault_config_file_drives_injection(evidence_dir: Path) -> None:
 
     log_text = log_path.read_text(encoding="utf-8")
     assert "fault_injected fault=drop_connection" in log_text
+
+
+@pytest.mark.requirement("REQ-FAULT-001")
+def test_startup_delay_fault_delays_readiness(evidence_dir: Path) -> None:
+    """The DUT must not accept connections until the injected delay elapses.
+
+    This is the fault that mimics slow hardware coming up, and it is the one a
+    readiness poll with too short a deadline reports as a dead device.
+    """
+    delay_ms = 900
+    started = time.monotonic()
+    dut_iter = _start_dut(
+        evidence_dir,
+        "dut-fault-startup.log",
+        ["--fault", "startup_delay", "--fault-delay-ms", str(delay_ms)],
+    )
+    dut = next(dut_iter)
+    try:
+        # Immediately after launch the port must still be closed.
+        with (
+            pytest.raises(OSError),
+            socket.create_connection((dut.host, dut.port), timeout=0.2),
+        ):
+            pass
+
+        client = LabClient(dut.host, dut.port)
+        try:
+            client.wait_until_ready(deadline_seconds=15.0)
+        finally:
+            client.close()
+        elapsed = time.monotonic() - started
+        assert elapsed >= delay_ms / 1000, (
+            f"DUT became ready after {elapsed:.2f}s, before the "
+            f"{delay_ms} ms startup delay had elapsed"
+        )
+    finally:
+        with contextlib.suppress(StopIteration):
+            next(dut_iter)
+
+    log_text = dut.log_path.read_text(encoding="utf-8")
+    assert f"fault_injected fault=startup_delay delay_ms={delay_ms}" in log_text
+
+
+@pytest.mark.requirement("REQ-FAULT-001")
+def test_process_termination_fault_exits_after_the_configured_requests(
+    evidence_dir: Path,
+) -> None:
+    """The DUT must die mid-session, which is what a harness has to survive.
+
+    A DUT that vanishes is a different failure from one that answers wrongly:
+    the client sees a closed connection, and the evidence has to show the
+    process exited rather than the test being flaky.
+    """
+    dut_iter = _start_dut(
+        evidence_dir,
+        "dut-fault-termination.log",
+        ["--fault", "process_termination"],
+    )
+    dut = next(dut_iter)
+    try:
+        # Readiness cannot be probed with a status request here: the preset
+        # exits on the *first* request, so the probe itself would kill the DUT.
+        # Wait for the port to accept instead, exactly as the malformed-response
+        # test does — a readiness check has to survive the fault it precedes.
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            try:
+                with socket.create_connection((dut.host, dut.port), timeout=0.2):
+                    break
+            except OSError:
+                time.sleep(0.05)
+        else:
+            pytest.fail("DUT did not accept connections in time")
+
+        client = LabClient(dut.host, dut.port, response_timeout=2.0)
+        client.connect()
+        with pytest.raises(LabCommunicationError):
+            client.request({"command": "status", "sequence": 1})
+        client.close()
+
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and dut.process.poll() is None:
+            time.sleep(0.05)
+        assert dut.process.poll() is not None, "DUT should have terminated itself"
+        assert dut.process.returncode != 0, "termination fault must be a failure exit"
+    finally:
+        with contextlib.suppress(StopIteration):
+            next(dut_iter)
+
+    log_text = dut.log_path.read_text(encoding="utf-8")
+    assert "fault_injected fault=process_termination" in log_text

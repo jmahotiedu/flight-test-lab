@@ -19,6 +19,10 @@ from learning.server.curriculum import Curriculum, Lesson
 
 STATE_VERSION = 1
 
+# A mastered question stays in the pool for occasional review rather than
+# disappearing, so interview mode never runs out of material.
+MIN_INTERVIEW_WEIGHT = 0.05
+
 
 def _now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
@@ -42,20 +46,40 @@ class ProgressStore:
         self._lock = threading.Lock()
         self._state = self._load()
 
+    def _backup_locked(self) -> None:
+        backup = self._path.with_suffix(".corrupt.json")
+        with contextlib.suppress(OSError):
+            shutil.copy2(self._path, backup)
+
     def _load(self) -> dict[str, Any]:
         if not self._path.exists():
             return _empty_state()
         try:
             data = json.loads(self._path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
-            backup = self._path.with_suffix(".corrupt.json")
-            with contextlib.suppress(OSError):
-                shutil.copy2(self._path, backup)
+            self._backup_locked()
             return _empty_state()
         if not isinstance(data, dict) or data.get("version") != STATE_VERSION:
+            self._backup_locked()
             return _empty_state()
+        # Valid JSON is not the same as a valid state file.  Something like
+        # {"version": 1, "lessons": []} parses fine and then fails much later
+        # with an AttributeError deep in a request handler; check the shape of
+        # every section here so a damaged file takes the documented
+        # back-up-and-reset path instead of breaking the dashboard.
         for key, default in _empty_state().items():
-            data.setdefault(key, default)
+            value = data.setdefault(key, default)
+            if key in ("version", "last_lesson_id"):
+                continue
+            if not isinstance(value, dict) or not all(
+                isinstance(k, str) and isinstance(v, dict) for k, v in value.items()
+            ):
+                self._backup_locked()
+                return _empty_state()
+        last_lesson = data.get("last_lesson_id")
+        if last_lesson is not None and not isinstance(last_lesson, str):
+            self._backup_locked()
+            return _empty_state()
         return data
 
     def _save_locked(self) -> None:
@@ -144,12 +168,22 @@ class ProgressStore:
             record["hints_used"] += 1
             self._save_locked()
 
-    def record_interview(self, question_id: str, correct: bool) -> None:
+    def record_interview(
+        self, question_id: str, correct: bool, concepts: tuple[str, ...] = ()
+    ) -> None:
+        """Record an interview answer and credit its concepts.
+
+        The answer feeds concept mastery for the same reason a lesson quiz
+        does: interview mode advertises that it tracks weak areas, and it can
+        only do that if answering there moves the same numbers.
+        """
         with self._lock:
             entry = self._state["interview"].setdefault(
                 question_id, {"correct": 0, "incorrect": 0}
             )
             entry["correct" if correct else "incorrect"] += 1
+            if concepts:
+                self._bump_concepts_locked(concepts, correct)
             self._save_locked()
 
     def _bump_concepts_locked(self, concepts: tuple[str, ...], correct: bool) -> None:
@@ -246,8 +280,11 @@ class ProgressStore:
     ) -> dict[str, float]:
         """Weight each interview question by weakness of its concepts.
 
-        Unseen questions get a neutral weight; questions tagged with weak
-        concepts weigh more, so misses resurface.
+        Unseen questions get a neutral weight, misses weigh much more so they
+        resurface, and each correct answer *decays* the weight so a question
+        you have repeatedly answered right stops crowding out ones you have
+        never seen.  The floor keeps mastered questions in the pool for
+        occasional review instead of removing them.
         """
         mastery = self.concept_mastery(
             tuple({c for cs in question_concepts.values() for c in cs})
@@ -266,6 +303,9 @@ class ProgressStore:
                     weight += 1.0 - float(score)
             history = interview_state.get(qid, {"correct": 0, "incorrect": 0})
             weight += 2.0 * float(history.get("incorrect", 0))
-            weight += 0.2 * float(history.get("correct", 0))
-            weights[qid] = weight
+            # Halve the weight per consecutive-ish correct answer (capped, so
+            # the arithmetic stays bounded), never below the floor.
+            correct = min(int(history.get("correct", 0)), 6)
+            weight *= 0.5**correct
+            weights[qid] = max(weight, MIN_INTERVIEW_WEIGHT)
         return weights

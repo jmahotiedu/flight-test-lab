@@ -7,12 +7,50 @@ and the result reports ``timed_out``.
 
 from __future__ import annotations
 
+import contextlib
 import os
+import signal
 import subprocess
+import sys
 import time
 from pathlib import Path
 
 DEFAULT_ENV_EXCLUDES = ("EVIDENCE_DIR",)
+
+
+# Put each child in its own process group (POSIX) or job-control group
+# (Windows) so it can be killed as a whole.  Validators start processes that
+# start processes: pytest launches a DUT, a probe launches the simulator.
+# Killing only the direct child on timeout leaves those grandchildren running
+# — holding ports and writing logs — after the UI has reported a timeout.
+if sys.platform == "win32":
+    CREATION_FLAGS = subprocess.CREATE_NEW_PROCESS_GROUP
+    START_NEW_SESSION = False
+else:
+    CREATION_FLAGS = 0
+    START_NEW_SESSION = True
+
+
+def kill_process_tree(process: subprocess.Popen[str]) -> None:
+    """Terminate a child and everything it started."""
+    if process.poll() is not None:
+        return
+    if sys.platform == "win32":
+        # taskkill /T walks the child tree that CREATE_NEW_PROCESS_GROUP kept
+        # attached to this pid; process.kill() alone would orphan it.
+        with contextlib.suppress(OSError, subprocess.SubprocessError):
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(process.pid)],
+                capture_output=True,
+                timeout=15,
+                check=False,
+            )
+    else:
+        with contextlib.suppress(OSError, ProcessLookupError):
+            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+    if process.poll() is None:
+        with contextlib.suppress(OSError):
+            process.kill()
 
 
 def run_subprocess(
@@ -39,13 +77,15 @@ def run_subprocess(
         text=True,
         encoding="utf-8",
         errors="replace",
+        creationflags=CREATION_FLAGS,
+        start_new_session=START_NEW_SESSION,
     )
     timed_out = False
     try:
         stdout, stderr = process.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
         timed_out = True
-        process.kill()
+        kill_process_tree(process)
         try:
             stdout, stderr = process.communicate(timeout=5.0)
         except subprocess.TimeoutExpired:

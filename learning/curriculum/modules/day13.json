@@ -102,11 +102,11 @@
           "id": "verify-shape",
           "validator": "source_check",
           "mandatory": true,
-          "description": "Checks that src/testlab/bench.py exists and defines the BenchLock class.",
+          "description": "Checks that src/testlab/bench.py exists, defines BenchLock, and is annotated — src/ is under strict mypy, so an untyped implementation would fail the quality gate you ran on Day 10.",
           "args": {
             "file": "src/testlab/bench.py",
-            "must_contain": ["class BenchLock"],
-            "success_note": "src/testlab/bench.py defines BenchLock — the shape is in place."
+            "must_contain": ["class BenchLock", "-> bool", "-> None"],
+            "success_note": "src/testlab/bench.py defines an annotated BenchLock — the shape is in place, and it will survive `mypy src simulator learning`."
           }
         },
         {
@@ -133,8 +133,8 @@
       "hints": [
         { "level": 1, "text": "The hard part is making 'create only if absent' atomic — a plain exists() check followed by write() leaves a race window between two acquirers." },
         { "level": 2, "text": "Use os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY) — it raises FileExistsError if the lock is already held. Write JSON: owner + datetime.now(timezone.utc).isoformat()." },
-        { "level": 3, "text": "Skeleton:\n\n```class BenchLock:\n    def __init__(self, path, owner):\n        self.path = Path(path)\n        self.owner = owner\n    def acquire(self):   # atomic create; False on FileExistsError\n        ...\n    def release(self):   # unlink, ignore missing\n        ...\n    def is_locked(self): # self.path.exists()\n        ...\n```\nLock file contents: {\"owner\": self.owner, \"timestamp\": <ISO-8601 UTC>}." },
-        { "level": 4, "text": "acquire(): try `fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)`; except FileExistsError return False; else os.write(fd, json.dumps({'owner': self.owner, 'timestamp': datetime.now(timezone.utc).isoformat()}).encode()); os.close(fd); return True. release(): `self.path.unlink(missing_ok=True)`. is_locked(): `return self.path.exists()`." }
+        { "level": 3, "text": "Skeleton — note the annotations: `src/` is type-checked by strict mypy, so an untyped method here would fail the quality gate you ran on Day 10.\n\n```from __future__ import annotations\n\nimport json\nimport os\nfrom datetime import UTC, datetime\nfrom pathlib import Path\n\n\nclass BenchLock:\n    def __init__(self, path: str | Path, owner: str) -> None:\n        self.path = Path(path)\n        self.owner = owner\n\n    def acquire(self) -> bool:   # atomic create; False on FileExistsError\n        ...\n\n    def release(self) -> None:   # unlink, ignore missing\n        ...\n\n    def is_locked(self) -> bool: # self.path.exists()\n        ...\n```\nLock file contents: {\"owner\": self.owner, \"timestamp\": <ISO-8601 UTC>}." },
+        { "level": 4, "text": "acquire(): try `fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)`; except FileExistsError return False; else os.write(fd, json.dumps({'owner': self.owner, 'timestamp': datetime.now(UTC).isoformat()}).encode()); os.close(fd); return True. release(): `self.path.unlink(missing_ok=True)`. is_locked(): `return self.path.exists()`. Keep the return annotations from hint 3 — `mypy src simulator learning` runs in strict mode and rejects an untyped def." }
       ]
     },
     {

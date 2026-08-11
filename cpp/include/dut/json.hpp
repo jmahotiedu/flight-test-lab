@@ -25,9 +25,16 @@ class Value;
 using Object = std::vector<std::pair<std::string, Value>>;
 using Array = std::vector<Value>;
 
+// An integer literal too large for int64_t.  Python has arbitrary-precision
+// ints and echoes such a value back unchanged, so the literal text is kept and
+// re-emitted verbatim rather than being clamped or turned into a float.
+struct RawNumber {
+  std::string text;
+};
+
 class Value {
  public:
-  enum class Type { Null, Bool, Int, Double, String, Array, Object };
+  enum class Type { Null, Bool, Int, Double, String, Array, Object, Raw };
 
   Value() : storage_(std::monostate{}) {}
   Value(std::nullptr_t) : storage_(std::monostate{}) {}
@@ -39,6 +46,7 @@ class Value {
   Value(const char* value) : storage_(std::string(value)) {}
   Value(Array value) : storage_(std::move(value)) {}
   Value(Object value) : storage_(std::move(value)) {}
+  Value(RawNumber value) : storage_(std::move(value)) {}
 
   Type type() const;
   bool is_null() const { return type() == Type::Null; }
@@ -61,8 +69,9 @@ class Value {
   std::string dump() const;
 
  private:
+  // Alternatives are ordered to match Type: storage_.index() is the type tag.
   std::variant<std::monostate, bool, std::int64_t, double, std::string, Array,
-               Object>
+               Object, RawNumber>
       storage_;
 };
 

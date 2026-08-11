@@ -42,7 +42,43 @@ PARITY_REQUESTS = (
     "{not json",
     "",
     "[1, 2, 3]",
+    # Malformed numbers: a scanner that is merely permissive (or that leans on
+    # strtod, which stops at the first bad character and reports success)
+    # accepts these while Python rejects the whole document.
+    '{"command": "status", "sequence": 1+2}',
+    '{"command": "status", "sequence": 1.2.3}',
+    '{"command": "status", "sequence": 1e}',
+    '{"command": "status", "sequence": 01}',
+    '{"command": "status", "sequence": .5}',
+    '{"command": "status", "sequence": 1.}',
+    '{"command": "status", "sequence": +1}',
+    # Well-formed numbers that must survive intact, including the ones whose
+    # *formatting* differs between a naive C++ serialiser and Python's float
+    # repr (1.5e3 must print as 1500.0, not 1500), overflow/underflow, and
+    # integers beyond int64 — Python has bignums and echoes them exactly.
+    '{"command": "status", "sequence": -12}',
+    '{"command": "status", "sequence": 1.5e3}',
+    '{"command": "status", "sequence": 0}',
+    '{"command": "status", "sequence": 1.0}',
+    '{"command": "status", "sequence": -0.0}',
+    '{"command": "status", "sequence": 0.1}',
+    '{"command": "status", "sequence": 3.141592653589793}',
+    '{"command": "status", "sequence": 1E3}',
+    '{"command": "status", "sequence": 1e400}',
+    '{"command": "status", "sequence": 1e-400}',
+    '{"command": "status", "sequence": 9223372036854775807}',
+    '{"command": "status", "sequence": 9223372036854775808}',
+    '{"command": "status", "sequence": -99999999999999999999}',
+    # Structural edge cases.
+    '{"command": "status", "sequence": 1,}',
+    '{"command": "status" "sequence": 1}',
+    '{"command": "sta\\u0074us", "sequence": 1}',
 )
+
+# Commands the course has the learner add to the Python DUT (Day 2 adds ping,
+# Day 9 adds counter).  They are not part of the shipped protocol, so on an
+# untouched checkout both DUTs reject them identically.
+COURSE_ADDED_COMMANDS = ("ping", "counter")
 
 
 def _wait_ready(host: str, port: int, deadline_seconds: float = 10.0) -> None:
@@ -139,6 +175,29 @@ def test_cpp_dut_is_byte_identical_to_python(
 ) -> None:
     """Both implementations must answer identically, byte for byte."""
     assert _ask_raw(cpp_dut, request_line) == _ask_raw(python_dut, request_line)
+
+
+@pytest.mark.requirement("REQ-CPP-001")
+@pytest.mark.parametrize("command", COURSE_ADDED_COMMANDS)
+def test_course_added_commands_do_not_diverge(
+    command: str, cpp_dut: int, python_dut: int
+) -> None:
+    """If the course had you extend one DUT, the other must follow.
+
+    Day 2 adds `ping` to the Python DUT and Day 9 adds `counter`.  Nothing
+    stops a learner from doing that and then certifying "parity" against a C++
+    DUT that never grew those branches, so the divergence is checked directly.
+    On an untouched checkout both reject the command identically and this
+    passes; once one side implements it, this fails until the other does too.
+    """
+    request = json.dumps({"command": command, "sequence": 1}, sort_keys=True)
+    python_reply = _ask_raw(python_dut, request)
+    cpp_reply = _ask_raw(cpp_dut, request)
+    assert python_reply == cpp_reply, (
+        f"the two DUTs disagree about {command!r}: the course adds it to the "
+        f"Python DUT, so it has to be ported to cpp/ as well.\n"
+        f"  python: {python_reply}\n  cpp:    {cpp_reply}"
+    )
 
 
 @pytest.mark.requirement("REQ-CPP-001")

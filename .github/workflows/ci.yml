@@ -36,8 +36,14 @@ jobs:
           cmake -S cpp -B cpp/build
           cmake --build cpp/build
 
+      # --output-junit writes the CTest results under evidence/, which is what
+      # the traceability map points at for REQ-CPP-001. Leaving them in the
+      # build tree would mean the evidence vanished with the runner.
       - name: Run CTest
-        run: ctest --test-dir cpp/build -C Debug --output-on-failure
+        run: |
+          mkdir -p evidence/junit
+          ctest --test-dir cpp/build -C Debug --output-on-failure \
+            --output-junit "$GITHUB_WORKSPACE/evidence/junit/ctest-results.xml"
 
       - name: Lint
         run: ruff check src simulator tests learning

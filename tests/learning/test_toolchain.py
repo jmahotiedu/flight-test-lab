@@ -175,6 +175,22 @@ def test_gdb_without_symbols_is_diagnosed_not_just_reported() -> None:
     assert "-DCMAKE_CXX_COMPILER=g++" in result.interpretation
 
 
+def test_ptrace_denial_is_diagnosed() -> None:
+    """Yama's default ptrace_scope blocks sibling attach; say what to do."""
+    result = toolchain_check._evaluate(
+        "gdb-attach",
+        {"expect_output_regex": "trigger_hang"},
+        0,
+        "",
+        "ptrace: Operation not permitted.",
+        90,
+        False,
+        ValidatorContext(repo_root=REPO_ROOT),
+    )
+    assert not result.passed
+    assert "ptrace_scope" in result.interpretation
+
+
 def test_symbolic_gdb_failures_are_not_misdiagnosed() -> None:
     """A real assertion failure must not be blamed on the toolchain."""
     result = toolchain_check._evaluate(
